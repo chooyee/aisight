@@ -3,6 +3,7 @@ import compression from "compression";
 import express from "express";
 import { pino } from "pino";
 import pinoHttp from "pino-http";
+import { runMigrations } from "./app/lib/db/migrate.js";
 
 const app = express();
 const logger = pino({ level: process.env.LOG_LEVEL ?? "info" });
@@ -31,6 +32,8 @@ app.all(
       : await import("./build/server/index.js"),
   })
 );
+
+await runMigrations();
 
 const port = Number(process.env.PORT ?? 3000);
 app.listen(port, () => {
