@@ -21,8 +21,6 @@ import { extractFromArticle } from "./geminiExtract.js";
 import { hashUrl } from "./dedup.js";
 import { logger } from "../logger.js";
 
-const MAX_RETRIES = 3;
-
 export interface PipelineConfig {
   query: string;
   sessionId: string;

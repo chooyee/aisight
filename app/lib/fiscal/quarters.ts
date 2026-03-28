@@ -40,30 +40,27 @@ export function getFiscalQuarter(
     month >= calendar.yearStartMonth ? calYear : calYear - 1;
 
   // Compute quarter start/end dates
-  const startMonth = qStartMonth;
-  const startYear =
-    startMonth >= calendar.yearStartMonth ? fiscalYear : fiscalYear + 1;
-
   const nextQIndex = qStarts.indexOf(qStartMonth) + 1;
-  const endMonth =
-    nextQIndex < qStarts.length
-      ? qStarts[nextQIndex] - 1
-      : calendar.yearStartMonth + 10; // last quarter ends at FY end
 
-  const startDate = new Date(startYear, startMonth - 1, 1);
-  const endDate = new Date(
-    nextQIndex < qStarts.length ? startYear : startYear + 1,
-    nextQIndex < qStarts.length ? qStarts[nextQIndex] - 1 : calendar.yearStartMonth - 1,
-    0 // last day of previous month
-  );
+  // Start date of this quarter
+  const startYear =
+    qStartMonth >= calendar.yearStartMonth ? fiscalYear : fiscalYear + 1;
+  const startDate = new Date(startYear, qStartMonth - 1, 1);
 
-  return {
-    label: `Q${quarter} FY${fiscalYear}`,
-    fiscalYear,
-    quarter,
-    startDate,
-    endDate,
-  };
+  // End date: day before next quarter starts (or day before FY start for last quarter)
+  let endDate: Date;
+  if (nextQIndex < qStarts.length) {
+    // Not the last quarter — end is day before next quarter starts
+    const nextStartMonth = qStarts[nextQIndex];
+    const nextStartYear =
+      nextStartMonth >= calendar.yearStartMonth ? fiscalYear : fiscalYear + 1;
+    endDate = new Date(nextStartYear, nextStartMonth - 1, 0); // day 0 = last day of prev month
+  } else {
+    // Last quarter — end is day before FY start of next year
+    endDate = new Date(fiscalYear + 1, calendar.yearStartMonth - 1, 0);
+  }
+
+  return { label: `Q${quarter} FY${fiscalYear}`, fiscalYear, quarter, startDate, endDate };
 }
 
 /** List all fiscal quarters in a given fiscal year for a calendar. */
@@ -76,17 +73,23 @@ export function getFiscalQuartersForYear(
     const calYear =
       startMonth >= calendar.yearStartMonth ? fiscalYear : fiscalYear + 1;
     const nextQIndex = i + 1;
-    const endCalYear =
-      nextQIndex < qStarts.length ? calYear : calYear + 1;
-    const endMonth =
-      nextQIndex < qStarts.length ? qStarts[nextQIndex] : calendar.yearStartMonth;
+
+    let endDate: Date;
+    if (nextQIndex < qStarts.length) {
+      const nextStartMonth = qStarts[nextQIndex];
+      const nextCalYear =
+        nextStartMonth >= calendar.yearStartMonth ? fiscalYear : fiscalYear + 1;
+      endDate = new Date(nextCalYear, nextStartMonth - 1, 0);
+    } else {
+      endDate = new Date(fiscalYear + 1, calendar.yearStartMonth - 1, 0);
+    }
 
     return {
       label: `Q${i + 1} FY${fiscalYear}`,
       fiscalYear,
       quarter: i + 1,
       startDate: new Date(calYear, startMonth - 1, 1),
-      endDate: new Date(endCalYear, endMonth - 1, 0),
+      endDate,
     };
   });
 }
