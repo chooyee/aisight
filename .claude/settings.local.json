@@ -6,7 +6,11 @@
       "Bash(npm --version)",
       "Bash(npm show:*)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(gh repo:*)",
+      "Bash(npm install:*)",
+      "Bash(npx drizzle-kit:*)",
+      "Bash(npm run:*)"
     ]
   }
 }
