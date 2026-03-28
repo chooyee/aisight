@@ -1,11 +1,8 @@
 import { createRequestHandler } from "@react-router/express";
-import { installGlobals } from "@react-router/node";
 import compression from "compression";
 import express from "express";
 import { pino } from "pino";
 import pinoHttp from "pino-http";
-
-installGlobals();
 
 const app = express();
 const logger = pino({ level: process.env.LOG_LEVEL ?? "info" });
