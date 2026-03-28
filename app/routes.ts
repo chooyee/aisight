@@ -25,6 +25,7 @@ export default [
     route("articles", "routes/api.articles.ts"),
     route("entities", "routes/api.entities.ts"),
     route("graph", "routes/api.graph.ts"),
+    route("graph/chat", "routes/api.graph.chat.ts"),
     route("crawl", "routes/api.crawl.ts"),
     route("chat/:sessionId", "routes/api.chat.$sessionId.ts"),
     ...prefix("config", [

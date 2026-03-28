@@ -175,7 +175,8 @@ async function executePipeline(runId: string, config: PipelineConfig) {
       const extraction = await extractFromArticle(content, result.url);
 
       if (extraction) {
-        // Upsert entities
+        // Upsert entities — collect IDs for linking risk signals
+        const entityIdMap = new Map<string, string>();
         for (const ent of extraction.entities) {
           const existing = await db
             .select()
@@ -197,6 +198,8 @@ async function executePipeline(runId: string, config: PipelineConfig) {
             });
             emit(sessionId, "entity", { name: ent.name, entityType: ent.type });
           }
+
+          entityIdMap.set(ent.name, entityId);
 
           await db.insert(articleEntities).values({
             id: nanoid(),
@@ -237,13 +240,19 @@ async function executePipeline(runId: string, config: PipelineConfig) {
           id: eventId,
           articleId,
           description: extraction.summary,
+          eventType: extraction.eventType ?? null,
           occurredAt: extraction.eventDate ? new Date(extraction.eventDate) : null,
         });
 
         for (const signal of extraction.riskSignals) {
+          // Try to find a matching entity for this risk signal
+          const firstEntityName = extraction.entities[0]?.name;
+          const signalEntityId = firstEntityName ? entityIdMap.get(firstEntityName) : undefined;
+
           await db.insert(riskSignals).values({
             id: nanoid(),
             eventId,
+            entityId: signalEntityId ?? null,
             riskType: signal.riskType,
             category: signal.category,
             severity: signal.severity,

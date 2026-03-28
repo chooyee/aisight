@@ -10,7 +10,15 @@
       "Bash(gh repo:*)",
       "Bash(npm install:*)",
       "Bash(npx drizzle-kit:*)",
-      "Bash(npm run:*)"
+      "Bash(npm run:*)",
+      "Bash(node -e \"import\\(''@react-router/node''\\).then\\(m => console.log\\(Object.keys\\(m\\)\\)\\)\")",
+      "Bash(node -e \"import\\(''react-router''\\).then\\(m => console.log\\(''HydratedRouter'' in m\\)\\)\")",
+      "Bash(node -e \"import\\(''react-router/dom''\\).then\\(m => console.log\\(''HydratedRouter'' in m\\)\\)\")",
+      "Bash(grep -r \"getFiscalQuarter\\\\|quarterStartMonths\" /d/Users/LeeChooYee/repo/jsrepo/aisight/app --include=*.tsx --include=*.ts)",
+      "Bash(xargs basename:*)",
+      "Bash(grep -r \"unusedVariable\\\\|is declared but never used\" /d/Users/LeeChooYee/repo/jsrepo/aisight --include=*.ts --include=*.tsx)",
+      "Bash(npx tsc:*)",
+      "Bash(npm list:*)"
     ]
   }
 }

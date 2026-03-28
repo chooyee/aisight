@@ -31,6 +31,7 @@ export interface ExtractedRiskSignal {
 
 export interface ExtractionResult {
   eventDate?: string;
+  eventType?: string;
   entities: ExtractedEntity[];
   relationships: ExtractedRelationship[];
   summary: string;
@@ -89,6 +90,7 @@ ${articleText.slice(0, 8000)}
 Return ONLY valid JSON with this exact structure:
 {
   "eventDate": "YYYY-MM-DD or null",
+  "eventType": "regulation|enforcement|merger_acquisition|earnings|risk_event|policy_change|appointment|other",
   "entities": [
     { "name": "string", "type": "company|regulator|person|instrument", "role": "string", "jurisdiction": "2-letter country code or null" }
   ],
@@ -112,7 +114,7 @@ Rules:
 - extractionItems keys must exactly match the provided labels`;
 
     const model = getAI().getGenerativeModel({
-      model: "gemini-1.5-flash",
+      model: "gemini-2.5-flash-lite",
       safetySettings: SAFETY_SETTINGS,
       generationConfig: { responseMimeType: "application/json" },
     });
@@ -134,7 +136,7 @@ export async function reasonAcrossArticles(
 ): Promise<string | null> {
   try {
     const model = getAI().getGenerativeModel({
-      model: "gemini-1.5-pro",
+      model: "gemini-3-flash-preview",
       safetySettings: SAFETY_SETTINGS,
     });
 

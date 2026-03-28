@@ -7,7 +7,7 @@ let _db: ReturnType<typeof drizzle> | undefined;
 
 export function getDb() {
   if (!_db) {
-    const sqlite = new Database(process.env.DATABASE_URL ?? "./aisight.db");
+    const sqlite = new Database(process.env.DATABASE_URL ?? "./data/aisight.db");
     // Enable WAL mode for better concurrent read performance
     sqlite.pragma("journal_mode = WAL");
     sqlite.pragma("foreign_keys = ON");

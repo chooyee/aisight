@@ -6,6 +6,7 @@
 /.react-router
 
 # Database
+/data
 *.db
 *.db-shm
 *.db-wal
@@ -18,7 +19,8 @@
 .DS_Store
 *.pem
 
-# debug
+# logs
+/log
 npm-debug.log*
 yarn-debug.log*
 

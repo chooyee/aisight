@@ -60,8 +60,8 @@ The `pipelineEmitter` (`app/lib/sse/emitter.ts`) is the single in-process EventE
 
 ### LLM tiers
 
-- **Tier 1 — `gemini-2.5-flash-lite`**: entity/event/risk extraction from individual articles (`geminiExtract.ts → extractFromArticle`). Active `extractionItems` rows are loaded from DB and injected into the prompt dynamically.
-- **Tier 2 — `gemini-3-flash-preview`**: cross-article synthesis and complex reasoning (`geminiExtract.ts → reasonAcrossArticles`).
+- **Tier 1 — `gemini-2.5-flash-lite`**: entity/event/risk extraction from individual articles (`geminiExtract.ts → extractFromArticle`). Active `extractionItems` rows are loaded from DB and injected into the prompt dynamically. Extraction output includes `eventType` (e.g. `regulation`, `enforcement`, `earnings`, `risk_event`).
+- **Tier 2 — `gemini-3-flash-preview`**: cross-article synthesis, complex reasoning (`geminiExtract.ts → reasonAcrossArticles`), and graph chat Q&A (`api.graph.chat.ts`).
 
 ### Database (SQLite + Drizzle ORM)
 
@@ -81,6 +81,41 @@ Dates are always stored as absolute ISO timestamps. Fiscal quarter mapping is **
 
 Cytoscape accesses `window`/`document` on import and cannot run server-side. It is loaded via `import("cytoscape")` inside a `useEffect` in `app/routes/graph.tsx`. A `mounted` state gate ensures the container div exists before initialisation.
 
+### Graph page layout
+
+The graph page (`app/routes/graph.tsx`) uses a two-column layout:
+- **Left**: Cytoscape canvas (fills all remaining space), with a collapsible `Legend` overlay in the bottom-left corner.
+- **Right sidebar** (320 px, collapsible via header button): stacks `NodeDetail` (shown on node click) above `ChatPanel` (LLM chat).
+
+The `GraphCanvas` component exposes a `cyInstanceRef` prop so the parent page can call Cytoscape methods (e.g. highlight nodes returned by the graph chat).
+
+### Graph chat (`/api/graph/chat`)
+
+`POST /api/graph/chat` — resource route (`app/routes/api.graph.chat.ts`). Accepts `{ question, enableWebSearch }`. Pipeline:
+1. Keyword-matches entities by name in the DB.
+2. Fetches related relationships, events (via `articleEntities`), and risk signals.
+3. Optionally calls Tavily for live web search enrichment (only if `TAVILY_API_KEY` is set and `enableWebSearch: true`).
+4. Calls Gemini Tier 2 with the assembled context.
+5. Returns `{ answer, context: { counts }, highlightEntityIds, highlightEventIds }`.
+
+The frontend uses `highlightEntityIds` / `highlightEventIds` to add a yellow `.highlighted` CSS class to matched Cytoscape nodes.
+
+### Knowledge graph data model
+
+The graph has two node types and two edge types:
+
+| Type | Shape | Colour source | DB table |
+|------|-------|---------------|----------|
+| Entity node | Circle | `type` field (company/regulator/person/instrument) | `entities` |
+| Event node | Diamond | `eventType` field (regulation/enforcement/earnings/…) | `events` |
+| Entity↔Entity edge | Solid line | — | `relationships` |
+| Entity↔Event edge | Dashed line | — | Derived: `articleEntities` + `events` sharing same `articleId` |
+
+### Pipeline enrichments (recent)
+
+- `orchestrator.ts` builds an `entityIdMap` during the entity upsert loop and links `riskSignals.entityId` to the primary extracted entity.
+- `geminiExtract.ts` prompt now requests `eventType` in the JSON output; `orchestrator.ts` stores it on the `events` row.
+
 ### Key files
 
 | File | Purpose |
@@ -91,3 +126,6 @@ Cytoscape accesses `window`/`document` on import and cannot run server-side. It 
 | `app/lib/pipeline/orchestrator.ts` | Pipeline coordinator — call `runPipeline()` to trigger a scrape |
 | `app/lib/sse/emitter.ts` | In-process EventEmitter singleton for SSE |
 | `app/lib/pipeline/geminiExtract.ts` | LLM extraction — both tiers |
+| `app/routes/graph.tsx` | Knowledge graph page — Cytoscape, chat panel, node detail, legend |
+| `app/routes/api.graph.ts` | Graph data API — entities + events + derived involvement edges |
+| `app/routes/api.graph.chat.ts` | Graph chat API — keyword search + Gemini Q&A + optional Tavily web search |

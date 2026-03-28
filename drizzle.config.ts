@@ -5,6 +5,6 @@ export default {
   out: "./db/migrations",
   dialect: "sqlite",
   dbCredentials: {
-    url: process.env.DATABASE_URL ?? "./aisight.db",
+    url: process.env.DATABASE_URL ?? "./data/aisight.db",
   },
 } satisfies Config;

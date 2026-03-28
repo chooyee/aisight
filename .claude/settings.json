@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm uninstall pino-pretty)",
+      "Bash(node -e \"import\\(''pino''\\).then\\(m => console.log\\(m.default.version\\)\\)\")",
+      "Bash(node -e \"import {createRequire} from ''module''; const r=createRequire\\(import.meta.url\\); console.log\\(r.resolve\\(''pino-roll''\\)\\)\")",
+      "Bash(node -e \":*)",
+      "Bash(npm uninstall pino-roll)",
+      "Bash(node -e \"import {createRequire} from ''module''; const r=createRequire\\(import.meta.url\\); console.log\\(r.resolve\\(''pino-abstract-transport''\\)\\)\")",
+      "Bash(ls /d/Users/LeeChooYee/repo/jsrepo/aisight/*.db)",
+      "Bash(node -e \"console.log\\(require\\(''./node_modules/pino/package.json''\\).version, require\\(''./node_modules/pino-roll/package.json''\\).version\\)\")",
+      "Bash(node -e \"const p = require\\(''./package.json''\\); console.log\\(''type:'', p.type, ''\\\\ndev:'', p.scripts.dev\\)\")",
+      "Bash(node --version)",
+      "Bash(node -e \"console.log\\(require\\(''./node_modules/piscina/package.json''\\).version\\)\")",
+      "Bash(netstat -ano)",
+      "Bash(ss -tlnp)",
+      "Bash(tasklist /FI \"PID eq 29032\")",
+      "Bash(wmic process where \"ProcessId=29032\" get Name,CommandLine)",
+      "Bash(curl -s http://localhost:3000/api/graph -o /dev/null -w \"%{http_code}\")",
+      "Bash(wmic process where \"ProcessId=29032\" get WorkingDirectory)",
+      "Read(//d//**)",
+      "Read(//d/Users/LeeChooYee/**)",
+      "Bash(powershell -Command \":*)",
+      "Bash(curl -sv http://127.0.0.1:3000/)"
+    ],
+    "additionalDirectories": [
+      "D:\\Users\\LeeChooYee\\repo\\jsrepo\\aisight\\log"
+    ]
+  }
+}
