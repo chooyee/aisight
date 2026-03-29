@@ -371,15 +371,6 @@ function GraphCanvas({
               width: 2,
             },
           },
-          // Dimmed (not related to search)
-          {
-            selector: "node.dimmed",
-            style: { opacity: 0.1 },
-          },
-          {
-            selector: "edge.dimmed",
-            style: { opacity: 0.06 },
-          },
         ],
         layout: { name: "cose", animate: false, padding: 40 } as never,
       });
@@ -792,23 +783,25 @@ export default function GraphPage() {
     const cy = cyRef.current as any;
     if (!cy?.nodes) return;
     try {
-      cy.nodes().removeClass("highlighted dimmed neighbor");
-      cy.edges().removeClass("dimmed active");
+      cy.nodes().removeClass("highlighted neighbor");
+      cy.edges().removeClass("active");
+      cy.elements().show();
       cy.fit(undefined, 40);
     } catch { /* ignore */ }
     setHighlightActive(false);
   }, []);
 
-  // Highlight nodes returned by the chat, dim unrelated nodes, zoom to results
+  // Show only search-relevant nodes (matched + neighbours + connecting edges), hide the rest
   const handleHighlight = useCallback((entityIds: string[], eventIds: string[]) => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const cy = cyRef.current as any;
     if (!cy?.nodes) return;
 
     try {
-      // Clear previous state
-      cy.nodes().removeClass("highlighted dimmed neighbor");
-      cy.edges().removeClass("dimmed active");
+      // Reset previous state
+      cy.nodes().removeClass("highlighted neighbor");
+      cy.edges().removeClass("active");
+      cy.elements().show();
 
       const allIds = [...entityIds, ...eventIds];
       if (allIds.length === 0) {
@@ -816,31 +809,28 @@ export default function GraphPage() {
         return;
       }
 
-      // Mark matched nodes as highlighted
+      // Collect matched nodes
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      let highlightedNodes: any = cy.collection();
+      let matchedNodes: any = cy.collection();
       for (const id of allIds) {
-        const node = cy.nodes(`#${id}`);
-        node.addClass("highlighted");
-        highlightedNodes = highlightedNodes.union(node);
+        matchedNodes = matchedNodes.union(cy.nodes(`#${id}`));
       }
+      matchedNodes.addClass("highlighted");
 
-      // Find edges connected to highlighted nodes and their neighbor nodes
-      const connectedEdges = highlightedNodes.connectedEdges();
-      const neighborNodes = connectedEdges.connectedNodes().difference(highlightedNodes);
-
+      // One-hop neighbours and their connecting edges
+      const connectedEdges = matchedNodes.connectedEdges();
+      const neighborNodes = connectedEdges.connectedNodes().difference(matchedNodes);
       connectedEdges.addClass("active");
       neighborNodes.addClass("neighbor");
 
-      // Dim everything else
-      cy.nodes().difference(highlightedNodes).difference(neighborNodes).addClass("dimmed");
-      cy.edges().difference(connectedEdges).addClass("dimmed");
+      // Hide everything not in the relevant subgraph
+      const visibleNodes = matchedNodes.union(neighborNodes);
+      const visibleEdges = connectedEdges;
+      cy.nodes().difference(visibleNodes).hide();
+      cy.edges().difference(visibleEdges).hide();
 
-      // Zoom/fit to highlighted + neighbour nodes
-      const focusSet = highlightedNodes.union(neighborNodes);
-      if (focusSet.length > 0) {
-        cy.fit(focusSet, 80);
-      }
+      // Zoom to the visible subgraph
+      cy.fit(visibleNodes, 80);
 
       setHighlightActive(true);
     } catch { /* ignore if Cytoscape not ready */ }
