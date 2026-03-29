@@ -222,6 +222,53 @@ export async function action({ request }: ActionFunctionArgs) {
     const allSubgraphEntities = [...uniqueEntities, ...neighborEntities];
     const allSubgraphEntityIds = new Set(allSubgraphEntities.map((e) => e.id));
 
+    // ── Step 6c: Pre-compute accountability chains ────────────────────────────
+    // For each event, resolve: WHICH person held a leadership role at the
+    // involved entity AT THE TIME the event occurred.
+    // This gives Gemini a pre-computed chain so it doesn't have to guess.
+
+    const accountabilityChains: string[] = [];
+    for (const ev of relevantEvents.slice(0, 15)) {
+      const eventDate = ev.occurredAt ? new Date(ev.occurredAt) : null;
+      const eventYear = eventDate?.getFullYear() ?? null;
+      const eventDateStr = eventDate ? eventDate.toISOString().split("T")[0] : "unknown date";
+
+      // Entities mentioned in the same article as this event
+      const entitiesInArticle = matchedAE
+        .filter((ae) => ae.articleId === ev.articleId)
+        .map((ae) => ae.entityId)
+        .slice(0, 3);
+
+      for (const entityId of entitiesInArticle) {
+        const entity = allSubgraphEntities.find((e) => e.id === entityId);
+        if (!entity) continue;
+
+        // People who held employment/board roles at this entity at the event time
+        const leaders = allAffiliations.filter(({ aff }) => {
+          // Must be an "incoming" affiliation — person/entity → this company
+          if (aff.relatedEntityId !== entityId) return false;
+          if (!["employment", "board"].includes(aff.affiliationType)) return false;
+          if (eventYear && !affiliationActiveInYear(aff, eventYear)) return false;
+          return true;
+        });
+
+        if (leaders.length > 0) {
+          const leaderStr = leaders
+            .slice(0, 3)
+            .map(({ aff, subjectName }) => {
+              const period = aff.startDate || aff.endDate
+                ? ` [${aff.startDate ?? "?"}–${aff.endDate ?? "present"}]`
+                : "";
+              return `${subjectName ?? "?"} as ${aff.role ?? aff.affiliationType}${period}`;
+            })
+            .join("; ");
+          accountabilityChains.push(
+            `• [${eventDateStr}] "${ev.description?.slice(0, 100) ?? ev.eventType}" @ ${entity.name} — In charge: ${leaderStr}`
+          );
+        }
+      }
+    }
+
     // ── Step 7: Fetch articleEntities for relevant articles (involvement edges) ─
 
     const relevantAE = relevantArticleIds.size > 0
@@ -297,13 +344,13 @@ export async function action({ request }: ActionFunctionArgs) {
       : "";
 
     const temporalInstruction = mentionedYears.length > 0
-      ? `IMPORTANT: The question mentions specific year(s): ${mentionedYears.join(", ")}. When attributing actions or responsibility, you MUST use the affiliation history below to identify WHO held the relevant role during that period — not who holds it now. Lines marked "← ACTIVE in YYYY" identify the correct person. Lines marked "← NOT active in YYYY" must NOT be cited as responsible for events in that year.`
+      ? `CRITICAL: This question refers to year(s) ${mentionedYears.join(", ")}. You MUST use the Affiliation History and Accountability Chains below to identify who held each role DURING THAT PERIOD — NOT the current role-holder. Affiliations marked "← ACTIVE in YYYY" are correct for that year. Affiliations marked "← NOT active in YYYY" must NOT be cited as responsible.`
       : "";
 
     const prompt = `You are an intelligence analyst assistant for a Central Bank supervisor.
-You have access to a knowledge graph of financial entities, events, risk signals, and a verified affiliation history (who held which role at which organisation and when).
-Answer the user's question using the provided context. Be specific and cite sources when possible.
-If the knowledge graph has limited information, say so clearly.
+You have access to a knowledge graph including entities, events, risk signals, and a verified time-bounded affiliation history showing who held which role at which organisation and when.
+
+Your primary job when asked about causes, responsibility, or accountability: trace the chain from the event → the entity involved → the person who held the leadership role at that entity AT THE TIME of the event, using the Accountability Chains section below.
 
 ${temporalInstruction}
 
@@ -312,11 +359,11 @@ ${temporalInstruction}
 ### Entities Found (${uniqueEntities.length})
 ${entityContext || "None found matching the query."}
 
-### Affiliation History (${allAffiliations.length} records)
-${affiliationContext || "No affiliation records found for these entities."}
+### Accountability Chains — Pre-resolved: Event → Entity → Person In Charge at Event Time (${accountabilityChains.length})
+${accountabilityChains.length > 0 ? accountabilityChains.join("\n") : "No chains resolved — affiliation data may be incomplete for these entities."}
 
-### AI-Extracted Relationships (${relevantRelationships.length})
-${relationshipContext || "None found."}
+### Full Affiliation History (${allAffiliations.length} records)
+${affiliationContext || "No affiliation records found for these entities."}
 
 ### Events (${relevantEvents.length})
 ${eventContext || "None found."}
@@ -324,12 +371,15 @@ ${eventContext || "None found."}
 ### Risk Signals (${relevantRiskSignals.length})
 ${riskContext || "None found."}
 
+### AI-Extracted Relationships (${relevantRelationships.length})
+${relationshipContext || "None found."}
+
 ${webContext ? `### Web Search Results\n${webContext}` : ""}
 
 ## User Question
 ${question}
 
-Respond in a clear, structured format. Use bullet points for lists. Always state the person's role AND the time period when attributing responsibility. If you reference a web search result, include the URL.`;
+Answer in clear, structured format. When attributing responsibility, always state: the person's name, their role, and the specific time period they held it. Distinguish clearly between past role-holders and current ones.`;
 
     const model = getAI().getGenerativeModel({
       model: "gemini-3-flash-preview",

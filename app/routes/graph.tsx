@@ -1,9 +1,9 @@
 import type { LoaderFunctionArgs } from "@react-router/node";
 import { useLoaderData, useSearchParams } from "react-router";
 import { useState, useEffect, useRef, useCallback, type FormEvent } from "react";
-import { eq, and, or, gte, lt, isNull } from "drizzle-orm";
+import { eq, and, or, gte, lt, isNull, inArray } from "drizzle-orm";
 import { getDb } from "~/lib/db/client";
-import { entities, relationships, events, articleEntities, articles } from "~/lib/db/schema";
+import { entities, relationships, events, articleEntities, articles, entityAffiliations } from "~/lib/db/schema";
 import { AppShell } from "~/components/layout/AppShell";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -143,19 +143,54 @@ export async function loader({ request }: LoaderFunctionArgs) {
     );
   }
 
-  // ── Step 4: Fetch entities, optionally filtered by sector + active set ─────
-  // Limit to 200 entities on initial load — search returns focused subgraphs.
-  const allEntityRows = await db
-    .select()
-    .from(entities)
-    .where(sector ? eq(entities.sector, sector) : undefined)
-    .limit(200);
+  // ── Step 3b: Affiliation data + temporal entity expansion ─────────────────
+  // Helper: was an affiliation active during a given year?
+  function affActiveInYear(
+    aff: { startDate: string | null; endDate: string | null; isCurrent: boolean },
+    y: number
+  ): boolean {
+    const s = aff.startDate ? parseInt(aff.startDate.slice(0, 4)) : null;
+    const e = aff.endDate ? parseInt(aff.endDate.slice(0, 4)) : null;
+    if (s !== null && s > y) return false;
+    if (e !== null && e < y) return false;
+    return true;
+  }
 
-  // When time filter is active, drop entities not connected to any filtered event
-  const entityRows = activeEntityIds
-    ? allEntityRows.filter((e) => activeEntityIds!.has(e.id))
-    : allEntityRows;
+  const allAffRows = await db.select().from(entityAffiliations);
 
+  // The year of the active time filter (null = no filter)
+  const filterYear = year ? parseInt(year, 10) : null;
+
+  // When a year filter is active, expand activeEntityIds by pulling in every
+  // person/entity that had an active affiliation with an already-included entity
+  // during that year. This makes the CEO of a company appear in the 2017 graph
+  // even if they have no direct news article from 2017.
+  if (filterYear !== null && activeEntityIds) {
+    for (const a of allAffRows) {
+      if (!affActiveInYear(a, filterYear)) continue;
+      if (activeEntityIds.has(a.entityId) && !activeEntityIds.has(a.relatedEntityId)) {
+        activeEntityIds.add(a.relatedEntityId);
+      } else if (activeEntityIds.has(a.relatedEntityId) && !activeEntityIds.has(a.entityId)) {
+        activeEntityIds.add(a.entityId);
+      }
+    }
+  }
+
+  // ── Step 4: Fetch entities ────────────────────────────────────────────────
+  // • Time filter active → fetch exactly the expanded active set; bounded by
+  //   events + affiliations in the period so no extra limit needed.
+  // • No filter → cap at 200 to keep the initial graph manageable.
+  const allEntityRows = activeEntityIds && activeEntityIds.size > 0
+    ? await db.select().from(entities).where(inArray(entities.id, [...activeEntityIds]))
+    : activeEntityIds // activeEntityIds is an empty set — no entities match
+      ? []
+      : await db
+          .select()
+          .from(entities)
+          .where(sector ? eq(entities.sector, sector) : undefined)
+          .limit(200);
+
+  const entityRows = allEntityRows;
   const nodeIds = new Set(entityRows.map((e) => e.id));
 
   const entityNodes: GraphNode[] = entityRows.map((e) => ({
@@ -182,8 +217,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     },
   }));
 
-  // ── Step 5: Relationship edges (entity↔entity) ────────────────────────────
-  // nodeIds already reflects the filtered entity set, so this auto-filters.
+  // ── Step 5: Relationship edges (entity↔entity, AI-extracted) ─────────────
   const relRows = await db.select().from(relationships);
   const relEdges: GraphEdge[] = relRows
     .filter((r) => nodeIds.has(r.fromEntityId) && nodeIds.has(r.toEntityId))
@@ -197,6 +231,35 @@ export async function loader({ request }: LoaderFunctionArgs) {
         weight: r.weight,
       },
     }));
+
+  // ── Step 5b: Affiliation edges (time-filtered when year is set) ───────────
+  // When year filter active: show only affiliations that were active that year,
+  // and mark isCurrent=true if active in that year (drives teal vs dotted style).
+  // When no filter: show all affiliations, use stored isCurrent value.
+  const affiliationEdges: GraphEdge[] = allAffRows
+    .filter((a) => {
+      if (!nodeIds.has(a.entityId) || !nodeIds.has(a.relatedEntityId)) return false;
+      if (filterYear !== null) return affActiveInYear(a, filterYear);
+      return true;
+    })
+    .map((a) => {
+      const activeInFilter = filterYear !== null ? affActiveInYear(a, filterYear) : a.isCurrent;
+      const label = a.role
+        ? activeInFilter ? a.role : `${a.role} (past)`
+        : a.affiliationType;
+      return {
+        data: {
+          id: `aff_${a.id}`,
+          source: a.entityId,
+          target: a.relatedEntityId,
+          label,
+          edgeType: "affiliation" as const,
+          isCurrent: activeInFilter,
+          affiliationType: a.affiliationType,
+          ownershipPct: a.ownershipPct,
+        },
+      };
+    });
 
   // ── Step 6: Involvement edges (entity↔event via shared article) ───────────
 
@@ -246,7 +309,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
   }
 
   const nodes = [...entityNodes, ...eventNodes];
-  const edges = [...relEdges, ...involvementEdges];
+  const edges = [...relEdges, ...affiliationEdges, ...involvementEdges];
 
   return {
     nodes,
