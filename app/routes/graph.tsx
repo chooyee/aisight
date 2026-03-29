@@ -356,6 +356,30 @@ function GraphCanvas({
               "overlay-opacity": 0.15,
             },
           },
+          // Neighbour nodes (one hop from highlighted)
+          {
+            selector: "node.neighbor",
+            style: { opacity: 0.55 },
+          },
+          // Active edges (connecting highlighted / neighbour nodes)
+          {
+            selector: "edge.active",
+            style: {
+              "line-color": "#facc1580",
+              "target-arrow-color": "#facc1580",
+              opacity: 0.8,
+              width: 2,
+            },
+          },
+          // Dimmed (not related to search)
+          {
+            selector: "node.dimmed",
+            style: { opacity: 0.1 },
+          },
+          {
+            selector: "edge.dimmed",
+            style: { opacity: 0.06 },
+          },
         ],
         layout: { name: "cose", animate: false, padding: 40 } as never,
       });
@@ -695,6 +719,7 @@ export default function GraphPage() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [sidebarWidth, setSidebarWidth] = useState(320);
   const [searchParams, setSearchParams] = useSearchParams();
+  const [highlightActive, setHighlightActive] = useState(false);
   const cyRef = useRef<unknown>(null);
   const dragging = useRef(false);
   const dragStartX = useRef(0);
@@ -761,20 +786,63 @@ export default function GraphPage() {
     document.addEventListener("mouseup", onUp);
   }, [sidebarWidth]);
 
-  // Highlight nodes returned by the chat
+  // Clear all highlights and restore full graph view
+  const handleClearHighlight = useCallback(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const cy = cyRef.current as any;
+    if (!cy?.nodes) return;
+    try {
+      cy.nodes().removeClass("highlighted dimmed neighbor");
+      cy.edges().removeClass("dimmed active");
+      cy.fit(undefined, 40);
+    } catch { /* ignore */ }
+    setHighlightActive(false);
+  }, []);
+
+  // Highlight nodes returned by the chat, dim unrelated nodes, zoom to results
   const handleHighlight = useCallback((entityIds: string[], eventIds: string[]) => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const cy = cyRef.current as any;
     if (!cy?.nodes) return;
 
     try {
-      // Clear previous highlights
-      cy.nodes().removeClass("highlighted");
-      // Highlight matched nodes
+      // Clear previous state
+      cy.nodes().removeClass("highlighted dimmed neighbor");
+      cy.edges().removeClass("dimmed active");
+
       const allIds = [...entityIds, ...eventIds];
-      for (const id of allIds) {
-        cy.nodes(`#${id}`).addClass("highlighted");
+      if (allIds.length === 0) {
+        setHighlightActive(false);
+        return;
       }
+
+      // Mark matched nodes as highlighted
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let highlightedNodes: any = cy.collection();
+      for (const id of allIds) {
+        const node = cy.nodes(`#${id}`);
+        node.addClass("highlighted");
+        highlightedNodes = highlightedNodes.union(node);
+      }
+
+      // Find edges connected to highlighted nodes and their neighbor nodes
+      const connectedEdges = highlightedNodes.connectedEdges();
+      const neighborNodes = connectedEdges.connectedNodes().difference(highlightedNodes);
+
+      connectedEdges.addClass("active");
+      neighborNodes.addClass("neighbor");
+
+      // Dim everything else
+      cy.nodes().difference(highlightedNodes).difference(neighborNodes).addClass("dimmed");
+      cy.edges().difference(connectedEdges).addClass("dimmed");
+
+      // Zoom/fit to highlighted + neighbour nodes
+      const focusSet = highlightedNodes.union(neighborNodes);
+      if (focusSet.length > 0) {
+        cy.fit(focusSet, 80);
+      }
+
+      setHighlightActive(true);
     } catch { /* ignore if Cytoscape not ready */ }
   }, []);
 
@@ -846,6 +914,14 @@ export default function GraphPage() {
               <>
                 <GraphCanvas nodes={nodes} edges={edges} onNodeClick={handleNodeClick} cyInstanceRef={cyRef} />
                 <Legend />
+                {highlightActive && (
+                  <button
+                    onClick={handleClearHighlight}
+                    className="absolute top-3 left-3 bg-[var(--color-surface-1)]/90 backdrop-blur border border-[#facc15]/50 text-[#facc15] text-[11px] font-medium px-3 py-1.5 rounded-lg cursor-pointer hover:bg-[#facc15]/10 transition-colors z-10"
+                  >
+                    &#x2715; Clear search highlights
+                  </button>
+                )}
               </>
             )}
           </div>
