@@ -443,6 +443,34 @@ interface ChatMessage {
   };
   highlightEntityIds?: string[];
   highlightEventIds?: string[];
+  resolution?: {
+    mode: "resolved" | "ambiguous" | "no_match";
+    kind: "entity" | "event" | "none";
+    candidates?: Array<{
+      id: string;
+      name: string;
+      type: string;
+      sector: string | null;
+      country: string | null;
+      score: number;
+    }>;
+  };
+}
+
+type GraphChatResponse = {
+  answer?: string;
+  error?: string;
+  context?: ChatMessage["context"];
+  highlightEntityIds?: string[];
+  highlightEventIds?: string[];
+  resolution?: ChatMessage["resolution"];
+};
+
+function createGraphChatSessionId() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `graph-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 // ── Chat Panel ───────────────────────────────────────────────────────────────
@@ -456,15 +484,15 @@ function ChatPanel({
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [webSearch, setWebSearch] = useState(false);
+  const [sessionId] = useState(() => createGraphChatSessionId());
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages]);
 
-  const handleSubmit = async (e: FormEvent) => {
-    e.preventDefault();
-    const q = input.trim();
+  const submitQuestion = async (rawQuestion: string) => {
+    const q = rawQuestion.trim();
     if (!q || loading) return;
 
     setInput("");
@@ -475,9 +503,9 @@ function ChatPanel({
       const res = await fetch("/api/graph/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: q, enableWebSearch: webSearch }),
+        body: JSON.stringify({ question: q, enableWebSearch: webSearch, sessionId }),
       });
-      const data = await res.json();
+      const data = await res.json() as GraphChatResponse;
 
       if (data.error) {
         setMessages((prev) => [...prev, { role: "assistant", content: `Error: ${data.error}` }]);
@@ -490,11 +518,14 @@ function ChatPanel({
             context: data.context,
             highlightEntityIds: data.highlightEntityIds,
             highlightEventIds: data.highlightEventIds,
+            resolution: data.resolution,
           },
         ]);
         // Highlight matched nodes in the graph
         if (data.highlightEntityIds?.length || data.highlightEventIds?.length) {
           onHighlight(data.highlightEntityIds ?? [], data.highlightEventIds ?? []);
+        } else if (data.resolution?.mode === "no_match") {
+          onHighlight([], []);
         }
       }
     } catch {
@@ -502,6 +533,11 @@ function ChatPanel({
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    await submitQuestion(input);
   };
 
   return (
@@ -574,6 +610,25 @@ function ChatPanel({
                   {msg.context.webResultsUsed > 0 && <span>{msg.context.webResultsUsed} web</span>}
                 </div>
               )}
+              {msg.role === "assistant" && msg.resolution?.mode === "ambiguous" && msg.resolution.candidates && msg.resolution.candidates.length > 0 && (
+                <div className="mt-2 pt-2 border-t border-white/10 space-y-1.5">
+                  <p className="text-[10px] uppercase tracking-wide text-white/35">Choose a match</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {msg.resolution.candidates.map((candidate, index) => (
+                      <button
+                        key={`${candidate.id}-${index}`}
+                        type="button"
+                        disabled={loading}
+                        onClick={() => void submitQuestion(candidate.name)}
+                        className="text-left rounded-md border border-white/10 bg-black/20 px-2 py-1 text-[10px] text-white/75 hover:border-[var(--color-accent)] hover:text-white disabled:opacity-40"
+                      >
+                        <span className="block font-medium text-white/90">{index + 1}. {candidate.name}</span>
+                        <span className="block text-white/40">{[candidate.type, candidate.sector, candidate.country].filter(Boolean).join(" | ")}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         ))}
@@ -591,7 +646,7 @@ function ChatPanel({
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Ask about the graph..."
+            placeholder="Search by company, keyword, or event..."
             disabled={loading}
             className="flex-1 bg-[var(--color-surface-1)] border border-[var(--color-border)] rounded px-2 py-1.5 text-xs text-white/90 placeholder:text-white/30 focus:outline-none focus:border-[var(--color-accent)] disabled:opacity-50"
           />
@@ -823,7 +878,7 @@ export default function GraphPage() {
             className="text-white/40 hover:text-white/70 text-xs px-2 py-1 rounded border border-[var(--color-border)] cursor-pointer"
             title={sidebarOpen ? "Hide panel" : "Show panel"}
           >
-            {sidebarOpen ? "Panel &#x25C0;" : "&#x25B6; Panel"}
+            {sidebarOpen ? "Close Chat" : "Open Chat"}
           </button>
         </div>
 

@@ -34,6 +34,7 @@ export const logger = pino(
           colorize: true,
           translateTime: "SYS:yyyy-mm-dd HH:MM:ss",
           ignore: "pid,hostname",
+          timeZone: "Asia/Kuala_Lumpur",
         },
         level,
       },
