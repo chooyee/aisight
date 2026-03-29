@@ -141,10 +141,12 @@ export async function loader({ request }: LoaderFunctionArgs) {
   }
 
   // ── Step 4: Fetch entities, optionally filtered by sector + active set ─────
+  // Limit to 200 entities on initial load — search returns focused subgraphs.
   const allEntityRows = await db
     .select()
     .from(entities)
-    .where(sector ? eq(entities.sector, sector) : undefined);
+    .where(sector ? eq(entities.sector, sector) : undefined)
+    .limit(200);
 
   // When time filter is active, drop entities not connected to any filtered event
   const entityRows = activeEntityIds
@@ -259,11 +261,13 @@ function GraphCanvas({
   edges,
   onNodeClick,
   cyInstanceRef,
+  highlightIds,
 }: {
   nodes: GraphNode[];
   edges: GraphEdge[];
   onNodeClick: (data: NodeData) => void;
   cyInstanceRef?: React.MutableRefObject<unknown>;
+  highlightIds?: string[];
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const cyRef = useRef<unknown>(null);
@@ -356,24 +360,16 @@ function GraphCanvas({
               "overlay-opacity": 0.15,
             },
           },
-          // Neighbour nodes (one hop from highlighted)
-          {
-            selector: "node.neighbor",
-            style: { opacity: 0.55 },
-          },
-          // Active edges (connecting highlighted / neighbour nodes)
-          {
-            selector: "edge.active",
-            style: {
-              "line-color": "#facc1580",
-              "target-arrow-color": "#facc1580",
-              opacity: 0.8,
-              width: 2,
-            },
-          },
         ],
         layout: { name: "cose", animate: false, padding: 40 } as never,
       });
+      // Apply initial highlights (matched search nodes)
+      if (highlightIds?.length) {
+        for (const id of highlightIds) {
+          cy.nodes(`#${id}`).addClass("highlighted");
+        }
+      }
+
       cy.on("tap", "node", (evt) => {
         const node = evt.target;
         const d = node.data();
@@ -390,7 +386,7 @@ function GraphCanvas({
         cyRef.current = null;
       }
     };
-  }, [nodes, edges, onNodeClick]);
+  }, [nodes, edges, onNodeClick, highlightIds]);
 
   return <div ref={containerRef} className="w-full h-full" />;
 }
@@ -463,9 +459,13 @@ interface ChatMessage {
 // ── Chat Panel ───────────────────────────────────────────────────────────────
 
 function ChatPanel({
-  onHighlight,
+  onSearchResult,
 }: {
-  onHighlight: (entityIds: string[], eventIds: string[]) => void;
+  onSearchResult: (
+    entityIds: string[],
+    eventIds: string[],
+    subgraph: { nodes: GraphNode[]; edges: GraphEdge[] } | null
+  ) => void;
 }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
@@ -507,10 +507,11 @@ function ChatPanel({
             highlightEventIds: data.highlightEventIds,
           },
         ]);
-        // Highlight matched nodes in the graph
-        if (data.highlightEntityIds?.length || data.highlightEventIds?.length) {
-          onHighlight(data.highlightEntityIds ?? [], data.highlightEventIds ?? []);
-        }
+        onSearchResult(
+          data.highlightEntityIds ?? [],
+          data.highlightEventIds ?? [],
+          data.subgraph ?? null
+        );
       }
     } catch {
       setMessages((prev) => [...prev, { role: "assistant", content: "Failed to reach the server." }]);
@@ -703,14 +704,16 @@ const MONTHS = [
 // ── Page component ───────────────────────────────────────────────────────────
 
 export default function GraphPage() {
-  const { nodes, edges, entityCount, eventCount, edgeCount } =
-    useLoaderData<typeof loader>();
+  const loaderData = useLoaderData<typeof loader>();
+  const [displayNodes, setDisplayNodes] = useState(loaderData.nodes);
+  const [displayEdges, setDisplayEdges] = useState(loaderData.edges);
+  const [highlightIds, setHighlightIds] = useState<string[]>([]);
+  const [searchActive, setSearchActive] = useState(false);
   const [selected, setSelected] = useState<NodeData | null>(null);
   const [mounted, setMounted] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [sidebarWidth, setSidebarWidth] = useState(320);
   const [searchParams, setSearchParams] = useSearchParams();
-  const [highlightActive, setHighlightActive] = useState(false);
   const cyRef = useRef<unknown>(null);
   const dragging = useRef(false);
   const dragStartX = useRef(0);
@@ -777,63 +780,25 @@ export default function GraphPage() {
     document.addEventListener("mouseup", onUp);
   }, [sidebarWidth]);
 
-  // Clear all highlights and restore full graph view
-  const handleClearHighlight = useCallback(() => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const cy = cyRef.current as any;
-    if (!cy?.nodes) return;
-    try {
-      cy.nodes().removeClass("highlighted neighbor");
-      cy.edges().removeClass("active");
-      cy.elements().show();
-      cy.fit(undefined, 40);
-    } catch { /* ignore */ }
-    setHighlightActive(false);
-  }, []);
+  // Restore initial graph
+  const handleClearSearch = useCallback(() => {
+    setDisplayNodes(loaderData.nodes);
+    setDisplayEdges(loaderData.edges);
+    setHighlightIds([]);
+    setSearchActive(false);
+  }, [loaderData.nodes, loaderData.edges]);
 
-  // Show only search-relevant nodes (matched + neighbours + connecting edges), hide the rest
-  const handleHighlight = useCallback((entityIds: string[], eventIds: string[]) => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const cy = cyRef.current as any;
-    if (!cy?.nodes) return;
-
-    try {
-      // Reset previous state
-      cy.nodes().removeClass("highlighted neighbor");
-      cy.edges().removeClass("active");
-      cy.elements().show();
-
-      const allIds = [...entityIds, ...eventIds];
-      if (allIds.length === 0) {
-        setHighlightActive(false);
-        return;
-      }
-
-      // Collect matched nodes
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      let matchedNodes: any = cy.collection();
-      for (const id of allIds) {
-        matchedNodes = matchedNodes.union(cy.nodes(`#${id}`));
-      }
-      matchedNodes.addClass("highlighted");
-
-      // One-hop neighbours and their connecting edges
-      const connectedEdges = matchedNodes.connectedEdges();
-      const neighborNodes = connectedEdges.connectedNodes().difference(matchedNodes);
-      connectedEdges.addClass("active");
-      neighborNodes.addClass("neighbor");
-
-      // Hide everything not in the relevant subgraph
-      const visibleNodes = matchedNodes.union(neighborNodes);
-      const visibleEdges = connectedEdges;
-      cy.nodes().difference(visibleNodes).hide();
-      cy.edges().difference(visibleEdges).hide();
-
-      // Zoom to the visible subgraph
-      cy.fit(visibleNodes, 80);
-
-      setHighlightActive(true);
-    } catch { /* ignore if Cytoscape not ready */ }
+  // Replace graph with search subgraph returned by the chat API
+  const handleSearchResult = useCallback((
+    entityIds: string[],
+    eventIds: string[],
+    subgraph: { nodes: GraphNode[]; edges: GraphEdge[] } | null
+  ) => {
+    if (!subgraph || subgraph.nodes.length === 0) return;
+    setDisplayNodes(subgraph.nodes as typeof loaderData.nodes);
+    setDisplayEdges(subgraph.edges as typeof loaderData.edges);
+    setHighlightIds([...entityIds, ...eventIds]);
+    setSearchActive(true);
   }, []);
 
   return (
@@ -845,7 +810,9 @@ export default function GraphPage() {
             <div>
               <h1 className="text-base font-semibold leading-tight">Knowledge Graph</h1>
               <p className="text-[11px] text-white/35">
-                {entityCount} entities &#xb7; {eventCount} events &#xb7; {edgeCount} edges
+                {searchActive
+                  ? `${displayNodes.length} nodes &#xb7; ${displayEdges.length} edges (search result)`
+                  : `${loaderData.entityCount} entities &#xb7; ${loaderData.eventCount} events &#xb7; ${loaderData.edgeCount} edges`}
               </p>
             </div>
 
@@ -889,7 +856,7 @@ export default function GraphPage() {
         <div className="flex flex-1 min-h-0">
           {/* Graph canvas — takes remaining space */}
           <div className="flex-1 min-w-0 relative">
-            {nodes.length === 0 ? (
+            {loaderData.nodes.length === 0 ? (
               <div className="absolute inset-0 flex items-center justify-center text-white/30">
                 <div className="text-center">
                   <p className="text-4xl mb-3">&#x2B21;</p>
@@ -902,14 +869,20 @@ export default function GraphPage() {
               </div>
             ) : (
               <>
-                <GraphCanvas nodes={nodes} edges={edges} onNodeClick={handleNodeClick} cyInstanceRef={cyRef} />
+                <GraphCanvas
+                  nodes={displayNodes}
+                  edges={displayEdges}
+                  onNodeClick={handleNodeClick}
+                  cyInstanceRef={cyRef}
+                  highlightIds={highlightIds}
+                />
                 <Legend />
-                {highlightActive && (
+                {searchActive && (
                   <button
-                    onClick={handleClearHighlight}
+                    onClick={handleClearSearch}
                     className="absolute top-3 left-3 bg-[var(--color-surface-1)]/90 backdrop-blur border border-[#facc15]/50 text-[#facc15] text-[11px] font-medium px-3 py-1.5 rounded-lg cursor-pointer hover:bg-[#facc15]/10 transition-colors z-10"
                   >
-                    &#x2715; Clear search highlights
+                    &#x2715; Back to full graph
                   </button>
                 )}
               </>
@@ -944,7 +917,7 @@ export default function GraphPage() {
                     <p className="text-[10px] text-white/40 uppercase tracking-wide font-medium">Graph Chat</p>
                   </div>
                   <div className="flex-1 min-h-0">
-                    <ChatPanel onHighlight={handleHighlight} />
+                    <ChatPanel onSearchResult={handleSearchResult} />
                   </div>
                 </div>
               </div>
