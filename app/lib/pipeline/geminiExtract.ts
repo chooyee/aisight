@@ -21,6 +21,16 @@ export interface ExtractedRelationship {
   type: string;
 }
 
+export interface ExtractedAffiliation {
+  personName: string;       // must match a name in the entities list
+  companyName: string;      // must match a name in the entities list
+  role: string;             // e.g. "CEO", "Chairman", "70% shareholder"
+  affiliationType: "employment" | "board" | "ownership" | "advisory" | "regulatory";
+  startDate: string | null; // "YYYY" or null
+  endDate: string | null;   // "YYYY" or null (null = current)
+  isCurrent: boolean;
+}
+
 export interface ExtractedRiskSignal {
   riskType: string;
   category: string;
@@ -34,6 +44,7 @@ export interface ExtractionResult {
   eventType?: string;
   entities: ExtractedEntity[];
   relationships: ExtractedRelationship[];
+  affiliations: ExtractedAffiliation[];
   summary: string;
   riskSignals: ExtractedRiskSignal[];
   extractionItems: Record<string, { detected: boolean; evidence: string }>;
@@ -97,6 +108,9 @@ Return ONLY valid JSON with this exact structure:
   "relationships": [
     { "source": "entity name", "target": "entity name", "type": "regulated_by|acquired|competes_with|investigated_by|partnered_with|mentions" }
   ],
+  "affiliations": [
+    { "personName": "person entity name", "companyName": "company/regulator entity name", "role": "CEO|Chairman|Director|etc", "affiliationType": "employment|board|ownership|advisory|regulatory", "startDate": "YYYY or null", "endDate": "YYYY or null", "isCurrent": true|false }
+  ],
   "summary": "2-3 sentence factual summary of what happened",
   "riskSignals": [
     { "riskType": "string", "category": "Basel Pillar 1|Basel Pillar 2|Basel Pillar 3|Supervisory|Corporate|Market", "severity": "low|medium|high", "direction": "positive|negative|neutral", "rationale": "string" }
@@ -111,7 +125,9 @@ Rules:
 - eventDate must be the actual event date, not the publication date if different
 - Only include entities explicitly mentioned in the article
 - riskSignals only if the article contains clear evidence
-- extractionItems keys must exactly match the provided labels`;
+- extractionItems keys must exactly match the provided labels
+- affiliations: only extract when the article explicitly states a person's role at a company (e.g. "CEO of X", "appointed as Chairman of Y"); both names must appear in the entities list; use null for unknown dates; isCurrent=false only if the article explicitly states the role has ended
+- affiliations array may be empty []`;
 
     const model = getAI().getGenerativeModel({
       model: "gemini-2.5-flash-lite",

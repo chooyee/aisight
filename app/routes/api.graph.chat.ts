@@ -336,10 +336,109 @@ export async function action({ request }: ActionFunctionArgs) {
 
     const dedupedEntities = [...new Map(uniqueEntities.map((entity) => [entity.id, entity])).values()];
 
-    const relevantAE = relevantArticleIds.size > 0
+    const relevantAE = relatedArticleIds.size > 0
       ? await db.select().from(articleEntities)
-          .where(inArray(articleEntities.articleId, [...relevantArticleIds]))
+          .where(inArray(articleEntities.articleId, [...relatedArticleIds]))
       : [];
+
+    // ── Step 5: Extract mentioned years from the question ────────────────────
+    const yearMatches = question.match(/\b(19[5-9]\d|20[0-3]\d)\b/g);
+    const mentionedYears = yearMatches ? [...new Set(yearMatches.map(Number))] : [];
+
+    function affiliationActiveInYear(
+      aff: { startDate: string | null; endDate: string | null; isCurrent: boolean },
+      year: number
+    ): boolean {
+      const s = aff.startDate ? parseInt(aff.startDate.slice(0, 4), 10) : null;
+      const e = aff.endDate ? parseInt(aff.endDate.slice(0, 4), 10) : null;
+      if (s !== null && s > year) return false;
+      if (e !== null && e < year) return false;
+      return true;
+    }
+
+    // ── Step 6: Fetch neighbor entities (linked via relationships) ───────────
+    const resolvedEntityIdSet = new Set(resolvedEntityIds);
+    const neighborEntityIds = [
+      ...new Set(
+        relevantRelationships
+          .flatMap((r) => [r.fromEntityId, r.toEntityId])
+          .filter((id) => !resolvedEntityIdSet.has(id))
+      ),
+    ];
+    const neighborEntities = neighborEntityIds.length > 0
+      ? await db.select().from(entities).where(inArray(entities.id, neighborEntityIds))
+      : [];
+
+    // ── Step 7: Fetch affiliations for all matched + neighbor entities ────────
+    const allEntityIds = [...new Set([...resolvedEntityIds, ...neighborEntityIds])];
+    const rawAffiliations = allEntityIds.length > 0
+      ? await db
+          .select()
+          .from(entityAffiliations)
+          .where(
+            or(
+              inArray(entityAffiliations.entityId, allEntityIds),
+              inArray(entityAffiliations.relatedEntityId, allEntityIds)
+            )
+          )
+          .limit(60)
+      : [];
+
+    // Collect person entities that appear as affiliation subjects but aren't
+    // in the lookup yet (they weren't directly matched or linked via relationships).
+    // Without this, Mr. XXX/YYY names resolve to raw IDs in the LLM context.
+    const alreadyLoadedIds = new Set([...uniqueEntities, ...neighborEntities].map((e) => e.id));
+    const missingSubjectIds = [
+      ...new Set(rawAffiliations.map((a) => a.entityId).filter((id) => !alreadyLoadedIds.has(id))),
+    ];
+    const affiliationSubjectEntities = missingSubjectIds.length > 0
+      ? await db.select().from(entities).where(inArray(entities.id, missingSubjectIds))
+      : [];
+
+    const allEntitiesForLookup = [...uniqueEntities, ...neighborEntities, ...affiliationSubjectEntities];
+    const allAffiliations = rawAffiliations.map((aff) => {
+      const subject = allEntitiesForLookup.find((e) => e.id === aff.entityId);
+      return { aff, subjectName: subject?.name, subjectType: subject?.type };
+    });
+
+    const relatedEntityIdList = [...new Set(rawAffiliations.map((a) => a.relatedEntityId))];
+    const relatedEntitiesRows = relatedEntityIdList.length > 0
+      ? await db.select().from(entities).where(inArray(entities.id, relatedEntityIdList))
+      : [];
+    const relatedEntityMap = new Map(relatedEntitiesRows.map((e) => [e.id, e]));
+
+    // ── Step 7b: Build accountability chains ─────────────────────────────────
+    const accountabilityChains: string[] = [];
+    for (const event of relevantEvents) {
+      if (!event.occurredAt) continue;
+      const eventYear = new Date(event.occurredAt).getFullYear();
+
+      const eventEntityIds = relevantAE
+        .filter((ae) => ae.articleId === event.articleId)
+        .map((ae) => ae.entityId);
+
+      for (const eid of eventEntityIds) {
+        const entity = allEntitiesForLookup.find((e) => e.id === eid);
+        if (!entity) continue;
+
+        const responsiblePersons = rawAffiliations
+          .filter((a) => a.relatedEntityId === eid && affiliationActiveInYear(a, eventYear))
+          .map((a) => {
+            const subject = allEntitiesForLookup.find((e) => e.id === a.entityId);
+            if (!subject || subject.type !== "person") return null;
+            return `${subject.name} (${a.role ?? a.affiliationType} of ${entity.name} in ${eventYear})`;
+          })
+          .filter((x): x is string => x !== null);
+
+        if (responsiblePersons.length > 0) {
+          const eventDesc = (event.description ?? event.eventType ?? "event").slice(0, 80);
+          const eventDate = new Date(event.occurredAt).toISOString().split("T")[0];
+          accountabilityChains.push(
+            `[${event.eventType ?? "event"} on ${eventDate}] ${eventDesc} → ${entity.name} → ${responsiblePersons.join(", ")}`
+          );
+        }
+      }
+    }
 
     // ── Step 8: Optionally enrich with web search ─────────────────────────────
 

@@ -638,7 +638,7 @@ function ChatPanel({
           ...prev,
           {
             role: "assistant",
-            content: data.answer,
+            content: data.answer ?? "",
             context: data.context,
             highlightEntityIds: data.highlightEntityIds,
             highlightEventIds: data.highlightEventIds,
@@ -647,9 +647,9 @@ function ChatPanel({
         ]);
         // Highlight matched nodes in the graph
         if (data.highlightEntityIds?.length || data.highlightEventIds?.length) {
-          onHighlight(data.highlightEntityIds ?? [], data.highlightEventIds ?? []);
+          onSearchResult(data.highlightEntityIds ?? [], data.highlightEventIds ?? [], null);
         } else if (data.resolution?.mode === "no_match") {
-          onHighlight([], []);
+          onSearchResult([], [], null);
         }
       }
     } catch {
@@ -951,18 +951,43 @@ export default function GraphPage() {
     setSearchActive(false);
   }, [loaderData.nodes, loaderData.edges]);
 
-  // Replace graph with search subgraph returned by the chat API
+  // Replace graph with search subgraph built from chat result entity/event IDs
   const handleSearchResult = useCallback((
     entityIds: string[],
     eventIds: string[],
     subgraph: { nodes: GraphNode[]; edges: GraphEdge[] } | null
   ) => {
-    if (!subgraph || subgraph.nodes.length === 0) return;
-    setDisplayNodes(subgraph.nodes as typeof loaderData.nodes);
-    setDisplayEdges(subgraph.edges as typeof loaderData.edges);
-    setHighlightIds([...entityIds, ...eventIds]);
+    const allMatchedIds = new Set([...entityIds, ...eventIds]);
+
+    // If the caller provides a pre-built subgraph, use it directly
+    if (subgraph && subgraph.nodes.length > 0) {
+      setDisplayNodes(subgraph.nodes as typeof loaderData.nodes);
+      setDisplayEdges(subgraph.edges as typeof loaderData.edges);
+      setHighlightIds([...allMatchedIds]);
+      setSearchActive(true);
+      return;
+    }
+
+    if (allMatchedIds.size === 0) return;
+
+    // Build subgraph client-side: matched nodes + their immediate neighbours
+    const neighborIds = new Set<string>();
+    for (const edge of loaderData.edges) {
+      if (allMatchedIds.has(edge.data.source)) neighborIds.add(edge.data.target);
+      if (allMatchedIds.has(edge.data.target)) neighborIds.add(edge.data.source);
+    }
+
+    const subgraphIds = new Set([...allMatchedIds, ...neighborIds]);
+    const filteredNodes = loaderData.nodes.filter((n) => subgraphIds.has(n.data.id));
+    const filteredEdges = loaderData.edges.filter(
+      (e) => subgraphIds.has(e.data.source) && subgraphIds.has(e.data.target)
+    );
+
+    setDisplayNodes(filteredNodes);
+    setDisplayEdges(filteredEdges);
+    setHighlightIds([...allMatchedIds]);
     setSearchActive(true);
-  }, []);
+  }, [loaderData.nodes, loaderData.edges]);
 
   return (
     <AppShell>

@@ -1,7 +1,8 @@
 import type { ActionFunctionArgs } from "@react-router/node";
-import { eq } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
+import { nanoid } from "nanoid";
 import { getDb } from "~/lib/db/client";
-import { entities, entityProfiles } from "~/lib/db/schema";
+import { entities, entityProfiles, entityAffiliations } from "~/lib/db/schema";
 import { logger } from "~/lib/logger";
 import { GoogleGenerativeAI, HarmBlockThreshold, HarmCategory } from "@google/generative-ai";
 
@@ -161,8 +162,92 @@ Rules:
         .where(eq(entityProfiles.entityId, id));
     }
 
+    // ── Auto-save extracted affiliations to DB ─────────────────────────────
+    type RawAffiliation = {
+      relatedEntityName: string;
+      relatedEntityType: string;
+      affiliationType: string;
+      role?: string | null;
+      ownershipPct?: number | null;
+      startDate?: string | null;
+      endDate?: string | null;
+      isCurrent?: boolean;
+      notes?: string | null;
+    };
+
+    const rawList = (parsed.affiliations ?? []) as RawAffiliation[];
+    const savedAffiliations: unknown[] = [];
+
+    for (const item of rawList) {
+      if (!item.relatedEntityName || !item.affiliationType) continue;
+
+      // Find or create the related entity
+      let [relatedEntity] = await db
+        .select()
+        .from(entities)
+        .where(eq(entities.name, item.relatedEntityName))
+        .limit(1);
+
+      if (!relatedEntity) {
+        const newId = nanoid();
+        [relatedEntity] = await db
+          .insert(entities)
+          .values({
+            id: newId,
+            name: item.relatedEntityName,
+            type: (item.relatedEntityType ?? "company") as "company" | "regulator" | "person" | "instrument",
+            firstSeenAt: new Date(),
+          })
+          .returning();
+      }
+
+      // Skip if this exact affiliation already exists
+      const [existing] = await db
+        .select({ id: entityAffiliations.id })
+        .from(entityAffiliations)
+        .where(
+          and(
+            eq(entityAffiliations.entityId, id),
+            eq(entityAffiliations.relatedEntityId, relatedEntity.id),
+            eq(entityAffiliations.affiliationType, item.affiliationType),
+            eq(entityAffiliations.role, item.role ?? "")
+          )
+        )
+        .limit(1);
+
+      if (existing) {
+        savedAffiliations.push({ ...item, id: existing.id, relatedEntityId: relatedEntity.id, skipped: true });
+        continue;
+      }
+
+      const isCurrent = item.isCurrent ?? (item.endDate == null);
+      const [inserted] = await db
+        .insert(entityAffiliations)
+        .values({
+          id: nanoid(),
+          entityId: id,
+          relatedEntityId: relatedEntity.id,
+          affiliationType: item.affiliationType as "employment" | "board" | "ownership" | "advisory" | "regulatory",
+          role: item.role ?? null,
+          ownershipPct: item.ownershipPct ?? null,
+          startDate: item.startDate ?? null,
+          endDate: isCurrent ? null : (item.endDate ?? null),
+          isCurrent,
+          source: "llm_research",
+          confidence: 0.8,
+          notes: item.notes ?? null,
+        })
+        .returning();
+
+      savedAffiliations.push({
+        ...inserted,
+        relatedName: relatedEntity.name,
+        relatedType: relatedEntity.type,
+      });
+    }
+
     return Response.json({
-      affiliations: parsed.affiliations ?? [],
+      affiliations: savedAffiliations,
       searchSummary,
     });
   } catch (err) {
