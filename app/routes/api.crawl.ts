@@ -1,4 +1,4 @@
-import type { ActionFunctionArgs } from "@react-router/node";
+import type { ActionFunctionArgs } from "react-router";
 import { nanoid } from "nanoid";
 import { getDb } from "~/lib/db/client";
 import { chatSessions, chatMessages } from "~/lib/db/schema";

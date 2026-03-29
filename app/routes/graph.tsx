@@ -1,4 +1,4 @@
-import type { LoaderFunctionArgs } from "@react-router/node";
+import type { LoaderFunctionArgs } from "react-router";
 import { useLoaderData, useSearchParams } from "react-router";
 import { useState, useEffect, useRef, useCallback, type FormEvent } from "react";
 import { eq, and, or, gte, lt, isNull, inArray } from "drizzle-orm";

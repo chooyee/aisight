@@ -1,5 +1,5 @@
 import { nanoid } from "nanoid";
-import { eq, and } from "drizzle-orm";
+import { eq, and, isNull } from "drizzle-orm";
 import { getDb } from "../db/client.js";
 import {
   articles,
@@ -237,28 +237,20 @@ async function executePipeline(runId: string, config: PipelineConfig) {
 
         // Insert affiliations (person↔company roles extracted from article)
         for (const aff of extraction.affiliations ?? []) {
-          const [personRow] = await db
-            .select({ id: entities.id })
-            .from(entities)
-            .where(eq(entities.name, aff.personName))
-            .limit(1);
-          const [companyRow] = await db
-            .select({ id: entities.id })
-            .from(entities)
-            .where(eq(entities.name, aff.companyName))
-            .limit(1);
+          const personId = entityIdMap.get(aff.personName);
+          const companyId = entityIdMap.get(aff.companyName);
 
-          if (!personRow || !companyRow) continue;
+          if (!personId || !companyId) continue;
 
           const [dup] = await db
             .select({ id: entityAffiliations.id })
             .from(entityAffiliations)
             .where(
               and(
-                eq(entityAffiliations.entityId, personRow.id),
-                eq(entityAffiliations.relatedEntityId, companyRow.id),
+                eq(entityAffiliations.entityId, personId),
+                eq(entityAffiliations.relatedEntityId, companyId),
                 eq(entityAffiliations.affiliationType, aff.affiliationType),
-                eq(entityAffiliations.role, aff.role)
+                aff.role ? eq(entityAffiliations.role, aff.role) : isNull(entityAffiliations.role)
               )
             )
             .limit(1);
@@ -268,8 +260,8 @@ async function executePipeline(runId: string, config: PipelineConfig) {
           const isCurrent = aff.isCurrent ?? (aff.endDate == null);
           await db.insert(entityAffiliations).values({
             id: nanoid(),
-            entityId: personRow.id,
-            relatedEntityId: companyRow.id,
+            entityId: personId,
+            relatedEntityId: companyId,
             affiliationType: aff.affiliationType,
             role: aff.role,
             startDate: aff.startDate ?? null,

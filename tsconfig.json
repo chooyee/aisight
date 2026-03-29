@@ -17,6 +17,7 @@
     "target": "ES2022",
     "strict": true,
     "allowJs": true,
+    "noEmit": true,
     "skipLibCheck": true,
     "paths": {
       "~/*": ["./app/*"]

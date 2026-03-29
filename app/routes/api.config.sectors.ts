@@ -1,4 +1,4 @@
-import type { ActionFunctionArgs, LoaderFunctionArgs } from "@react-router/node";
+import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { getDb } from "~/lib/db/client";

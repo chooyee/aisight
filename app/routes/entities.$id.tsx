@@ -1,7 +1,7 @@
-import type { LoaderFunctionArgs } from "@react-router/node";
+import type { LoaderFunctionArgs } from "react-router";
 import { useLoaderData, Link } from "react-router";
 import { eq } from "drizzle-orm";
-import { useState, useRef, type FormEvent } from "react";
+import { useState, type FormEvent } from "react";
 import { getDb } from "~/lib/db/client";
 import { entities, entityProfiles, entityAffiliations } from "~/lib/db/schema";
 import { AppShell } from "~/components/layout/AppShell";
@@ -102,27 +102,7 @@ type LoaderData = Awaited<ReturnType<typeof loader>>;
 type Affiliation = LoaderData["affiliations"][number];
 type ReverseAffiliation = LoaderData["reverseAffiliations"][number];
 
-interface SuggestedAffiliation {
-  relatedEntityName: string;
-  relatedEntityType: string;
-  affiliationType: string;
-  role: string | null;
-  ownershipPct: number | null;
-  startDate: string | null;
-  endDate: string | null;
-  isCurrent: boolean;
-  notes: string | null;
-  // resolved after name matching
-  resolvedEntityId?: string;
-  accepted?: boolean;
-}
-
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-function formatDate(d: string | null): string {
-  if (!d) return "Present";
-  return d;
-}
 
 function dateBadge(aff: { startDate: string | null; endDate: string | null; isCurrent: boolean }) {
   const s = aff.startDate ?? "?";
@@ -594,23 +574,41 @@ function ProfileForm({
 function ResearchPanel({
   entity,
   allEntities,
-  onAffiliationsSaved,
+  onAffiliationSaved,
 }: {
   entity: LoaderData["entity"];
   allEntities: LoaderData["allEntities"];
-  onAffiliationsSaved: (affs: Affiliation[]) => void;
+  onAffiliationSaved: (aff: Affiliation) => void;
 }) {
-  const [loading, setLoading] = useState(false);
-  const [suggestions, setSuggestions] = useState<SuggestedAffiliation[]>([]);
-  const [log, setLog] = useState<string>("");
-  const [saving, setSaving] = useState(false);
+  type ResearchSuggestion = {
+    relatedEntityName: string;
+    relatedEntityType: string;
+    affiliationType: string;
+    role?: string | null;
+    ownershipPct?: number | null;
+    startDate?: string | null;
+    endDate?: string | null;
+    isCurrent?: boolean;
+    notes?: string | null;
+    resolvedEntityId?: string;
+    checked: boolean;
+    saveState?: "idle" | "saving" | "saved" | "error";
+    saveError?: string;
+  };
 
-  const entityMap = new Map(allEntities.map((e) => [e.name.toLowerCase(), e]));
+  const [loading, setLoading] = useState(false);
+  const [savingAll, setSavingAll] = useState(false);
+  const [results, setResults] = useState<ResearchSuggestion[]>([]);
+  const [log, setLog] = useState<string>("");
+
+  const entityByName = new Map(
+    allEntities.map((e) => [e.name.trim().toLowerCase(), e])
+  );
 
   const handleResearch = async () => {
     setLoading(true);
-    setSuggestions([]);
-    setLog("Searching…");
+    setResults([]);
+    setLog("Searching...");
 
     const res = await fetch(`/api/entities/${entity.id}/research`, { method: "POST" });
     const data = await res.json();
@@ -621,49 +619,113 @@ function ResearchPanel({
       return;
     }
 
-    const resolved: SuggestedAffiliation[] = (data.affiliations ?? []).map((s: SuggestedAffiliation) => {
-      const match = entityMap.get(s.relatedEntityName?.toLowerCase() ?? "");
-      return { ...s, resolvedEntityId: match?.id, accepted: true };
+    const affs = (data.affiliations ?? []) as Array<{
+      relatedEntityName?: string;
+      relatedName?: string;
+      relatedEntityType?: string;
+      affiliationType: string;
+      role?: string | null;
+      ownershipPct?: number | null;
+      startDate?: string | null;
+      endDate?: string | null;
+      isCurrent?: boolean;
+      notes?: string | null;
+    }>;
+
+    const suggestions: ResearchSuggestion[] = affs.map((a) => {
+      const relatedEntityName = a.relatedName ?? a.relatedEntityName ?? "Unknown";
+      const resolved = entityByName.get(relatedEntityName.trim().toLowerCase());
+      return {
+        relatedEntityName,
+        relatedEntityType: a.relatedEntityType ?? resolved?.type ?? "company",
+        affiliationType: a.affiliationType,
+        role: a.role ?? null,
+        ownershipPct: a.ownershipPct ?? null,
+        startDate: a.startDate ?? null,
+        endDate: a.endDate ?? null,
+        isCurrent: a.isCurrent ?? (a.endDate == null),
+        notes: a.notes ?? null,
+        resolvedEntityId: resolved?.id,
+        checked: true,
+        saveState: "idle",
+      };
     });
 
-    setSuggestions(resolved);
-    setLog(data.searchSummary ?? `${resolved.length} suggestions found`);
+    setResults(suggestions);
+
+    const unmatched = suggestions.filter((s) => !s.resolvedEntityId).length;
+    const parts = [`${suggestions.length} suggestion(s) ready`];
+    if (unmatched > 0) parts.push(`${unmatched} need entity matching`);
+    setLog(data.searchSummary ? `${data.searchSummary} - ${parts.join(", ")}` : parts.join(", "));
   };
 
-  const handleSave = async () => {
-    const toSave = suggestions.filter((s) => s.accepted && s.resolvedEntityId);
+  const handleSaveSelected = async () => {
+    const toSave = results
+      .map((r, i) => ({ r, i }))
+      .filter(({ r }) => r.checked && r.saveState !== "saved" && r.saveState !== "saving");
+
     if (toSave.length === 0) return;
 
-    setSaving(true);
-    const saved: Affiliation[] = [];
-    for (const s of toSave) {
-      const res = await fetch(`/api/entities/${entity.id}/affiliations`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          relatedEntityId: s.resolvedEntityId,
-          affiliationType: s.affiliationType,
-          role: s.role,
-          ownershipPct: s.ownershipPct,
-          startDate: s.startDate,
-          endDate: s.endDate,
-          isCurrent: s.isCurrent,
-          source: "llm_research",
-          confidence: 0.8,
-          notes: s.notes,
-        }),
-      });
-      const data = await res.json();
-      if (data.affiliation) saved.push(data.affiliation);
-    }
-    setSaving(false);
-    onAffiliationsSaved(saved);
-    setSuggestions([]);
-    setLog(`Saved ${saved.length} affiliation(s).`);
-  };
+    setSavingAll(true);
+    setResults((prev) =>
+      prev.map((r, i) =>
+        toSave.some(({ i: ti }) => ti === i) ? { ...r, saveState: "saving", saveError: undefined } : r
+      )
+    );
 
-  const toggle = (i: number) =>
-    setSuggestions((prev) => prev.map((s, idx) => (idx === i ? { ...s, accepted: !s.accepted } : s)));
+    await Promise.all(
+      toSave.map(async ({ r, i }) => {
+        try {
+          // If no entity match, create one first
+          let resolvedEntityId = r.resolvedEntityId;
+          if (!resolvedEntityId) {
+            const createRes = await fetch("/api/entities", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ name: r.relatedEntityName, type: r.relatedEntityType }),
+            });
+            const createData = await createRes.json();
+            if (!createRes.ok || !createData.entity?.id) {
+              throw new Error(createData.error ?? "Failed to create entity");
+            }
+            resolvedEntityId = createData.entity.id as string;
+          }
+
+          const res = await fetch(`/api/entities/${entity.id}/affiliations`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              relatedEntityId: resolvedEntityId,
+              affiliationType: r.affiliationType,
+              role: r.role ?? null,
+              ownershipPct: r.ownershipPct ?? null,
+              startDate: r.startDate ?? null,
+              endDate: r.isCurrent ? null : (r.endDate ?? null),
+              isCurrent: r.isCurrent ?? (r.endDate == null),
+              notes: r.notes ?? null,
+              source: "llm_research",
+              confidence: 0.8,
+            }),
+          });
+
+          const data = await res.json();
+          if (!res.ok || !data.affiliation) throw new Error(data.error ?? "Save failed");
+
+          setResults((prev) =>
+            prev.map((item, idx) => (idx === i ? { ...item, saveState: "saved" } : item))
+          );
+          onAffiliationSaved(data.affiliation as Affiliation);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : "Save failed";
+          setResults((prev) =>
+            prev.map((item, idx) => (idx === i ? { ...item, saveState: "error", saveError: message } : item))
+          );
+        }
+      })
+    );
+
+    setSavingAll(false);
+  };
 
   return (
     <div className="border border-[var(--color-border)] rounded-lg p-4 space-y-3 bg-purple-500/5">
@@ -671,7 +733,7 @@ function ResearchPanel({
         <div>
           <p className="text-sm font-medium">AI Deep Research</p>
           <p className="text-xs text-white/40 mt-0.5">
-            Searches the web and extracts affiliations for <strong>{entity.name}</strong>
+            Searches the web and suggests affiliations for <strong>{entity.name}</strong>
           </p>
         </div>
         <button
@@ -679,74 +741,82 @@ function ResearchPanel({
           disabled={loading}
           className="bg-purple-600 hover:bg-purple-500 text-white text-sm px-4 py-1.5 rounded disabled:opacity-40 cursor-pointer"
         >
-          {loading ? "Researching…" : "Research with AI"}
+          {loading ? "Researching..." : "Research with AI"}
         </button>
       </div>
 
       {log && <p className="text-xs text-white/50">{log}</p>}
 
-      {suggestions.length > 0 && (
+      {results.length > 0 && (
         <div className="space-y-2">
-          <p className="text-xs font-medium text-white/60">Review suggestions — uncheck to skip:</p>
-          {suggestions.map((s, i) => (
+          <p className="text-xs font-medium text-white/60">Check the suggestions you want to save:</p>
+          {results.map((r, i) => (
             <div
-              key={i}
-              className={`flex items-start gap-3 p-2.5 rounded border ${s.accepted ? "border-purple-500/30 bg-purple-500/5" : "border-[var(--color-border)] opacity-50"}`}
+              key={`${r.relatedEntityName}-${r.affiliationType}-${i}`}
+              className={`flex items-start gap-3 p-2.5 rounded border ${r.saveState === "saved" ? "border-green-500/30 bg-green-500/5" : "border-[var(--color-border)]"}`}
             >
               <input
                 type="checkbox"
-                checked={s.accepted}
-                onChange={() => toggle(i)}
-                className="mt-0.5 w-3.5 h-3.5 accent-purple-500 cursor-pointer"
+                checked={r.checked}
+                disabled={r.saveState === "saved" || r.saveState === "saving"}
+                onChange={(e) =>
+                  setResults((prev) =>
+                    prev.map((item, idx) => (idx === i ? { ...item, checked: e.target.checked } : item))
+                  )
+                }
+                className="mt-0.5 w-3.5 h-3.5 rounded accent-[var(--color-accent)] cursor-pointer disabled:opacity-40 shrink-0"
               />
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 flex-wrap">
-                  <span className="font-medium text-sm">{s.relatedEntityName}</span>
-                  <span className="text-xs text-white/40 capitalize">{s.affiliationType}</span>
-                  {s.role && <span className="text-xs text-white/60">· {s.role}</span>}
-                  {s.ownershipPct != null && (
-                    <span className="text-xs text-white/60">· {s.ownershipPct}%</span>
+                  <span className="font-medium text-sm">{r.relatedEntityName}</span>
+                  <span className="text-xs text-white/40 capitalize">{r.affiliationType}</span>
+                  {r.role && <span className="text-xs text-white/60">· {r.role}</span>}
+                  {r.ownershipPct != null && (
+                    <span className="text-xs text-white/60">· {r.ownershipPct}%</span>
                   )}
-                  <span className="text-xs text-white/40">{dateBadge(s)}</span>
-                  {s.resolvedEntityId ? (
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/15 text-green-400">Entity found</span>
+                  <span className="text-xs text-white/40">
+                    {dateBadge({ startDate: r.startDate ?? null, endDate: r.endDate ?? null, isCurrent: r.isCurrent ?? true })}
+                  </span>
+                  {r.resolvedEntityId ? (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-300">Entity matched</span>
                   ) : (
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-orange-500/15 text-orange-400">Not in DB</span>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300">No matching entity</span>
+                  )}
+                  {r.saveState === "saving" && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/10 text-white/50">Saving…</span>
+                  )}
+                  {r.saveState === "saved" && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/15 text-green-400">Saved ✓</span>
                   )}
                 </div>
-                {s.notes && <p className="text-[11px] text-white/35 mt-0.5">{s.notes}</p>}
+                {r.notes && <p className="text-[11px] text-white/35 mt-0.5">{r.notes}</p>}
+                {r.saveState === "error" && (
+                  <p className="text-[11px] text-red-300 mt-0.5">{r.saveError ?? "Save failed"}</p>
+                )}
               </div>
             </div>
           ))}
 
           <div className="flex items-center gap-3 pt-1">
             <button
-              onClick={handleSave}
-              disabled={saving || !suggestions.some((s) => s.accepted && s.resolvedEntityId)}
+              onClick={handleSaveSelected}
+              disabled={savingAll || !results.some((r) => r.checked && r.saveState !== "saved")}
               className="bg-[var(--color-accent)] text-white text-sm px-4 py-1.5 rounded hover:opacity-80 disabled:opacity-40 cursor-pointer"
             >
-              {saving ? "Saving…" : `Save ${suggestions.filter((s) => s.accepted && s.resolvedEntityId).length} affiliation(s)`}
+              {savingAll ? "Saving…" : "Save Selected"}
             </button>
             <button
-              onClick={() => setSuggestions([])}
+              onClick={() => setResults([])}
               className="text-sm text-white/40 hover:text-white/70 cursor-pointer"
             >
               Dismiss
             </button>
           </div>
-          {suggestions.some((s) => !s.resolvedEntityId) && (
-            <p className="text-[11px] text-orange-400/70">
-              "Not in DB" items will be skipped. Add those entities first via scraping or manually.
-            </p>
-          )}
         </div>
       )}
     </div>
   );
 }
-
-// ── Page component ────────────────────────────────────────────────────────────
-
 export default function EntityDetailPage() {
   const loaderData = useLoaderData<typeof loader>();
   const { entity, profile, allEntities } = loaderData;
@@ -759,10 +829,6 @@ export default function EntityDetailPage() {
   const handleAffiliationSaved = (aff: Affiliation) => {
     setAffiliations((prev) => [aff, ...prev]);
     setShowAddForm(false);
-  };
-
-  const handleAffiliationsFromResearch = (affs: Affiliation[]) => {
-    setAffiliations((prev) => [...affs, ...prev]);
   };
 
   const handleDelete = (id: string) => {
@@ -835,7 +901,7 @@ export default function EntityDetailPage() {
             <ResearchPanel
               entity={entity}
               allEntities={allEntities}
-              onAffiliationsSaved={handleAffiliationsFromResearch}
+              onAffiliationSaved={handleAffiliationSaved}
             />
 
             {/* Outgoing affiliations (this entity → others) */}
@@ -947,3 +1013,5 @@ export default function EntityDetailPage() {
     </AppShell>
   );
 }
+
+

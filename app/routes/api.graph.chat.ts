@@ -1,4 +1,4 @@
-import type { ActionFunctionArgs } from "@react-router/node";
+import type { ActionFunctionArgs } from "react-router";
 import { eq, inArray, like, or } from "drizzle-orm";
 import { getDb } from "~/lib/db/client";
 import {
@@ -384,28 +384,30 @@ export async function action({ request }: ActionFunctionArgs) {
           .limit(60)
       : [];
 
-    // Collect person entities that appear as affiliation subjects but aren't
-    // in the lookup yet (they weren't directly matched or linked via relationships).
-    // Without this, Mr. XXX/YYY names resolve to raw IDs in the LLM context.
+    // Collect all entity IDs referenced by affiliations that we haven't loaded yet,
+    // then fetch them in a single query (subjects + related entities combined).
     const alreadyLoadedIds = new Set([...uniqueEntities, ...neighborEntities].map((e) => e.id));
-    const missingSubjectIds = [
-      ...new Set(rawAffiliations.map((a) => a.entityId).filter((id) => !alreadyLoadedIds.has(id))),
+    const missingIds = [
+      ...new Set([
+        ...rawAffiliations.map((a) => a.entityId),
+        ...rawAffiliations.map((a) => a.relatedEntityId),
+      ].filter((id) => !alreadyLoadedIds.has(id))),
     ];
-    const affiliationSubjectEntities = missingSubjectIds.length > 0
-      ? await db.select().from(entities).where(inArray(entities.id, missingSubjectIds))
+    const extraEntities = missingIds.length > 0
+      ? await db.select().from(entities).where(inArray(entities.id, missingIds))
       : [];
 
-    const allEntitiesForLookup = [...uniqueEntities, ...neighborEntities, ...affiliationSubjectEntities];
+    // Build a single Map for O(1) lookups across all entity resolution
+    const entityById = new Map(
+      [...uniqueEntities, ...neighborEntities, ...extraEntities].map((e) => [e.id, e])
+    );
+
     const allAffiliations = rawAffiliations.map((aff) => {
-      const subject = allEntitiesForLookup.find((e) => e.id === aff.entityId);
+      const subject = entityById.get(aff.entityId);
       return { aff, subjectName: subject?.name, subjectType: subject?.type };
     });
 
-    const relatedEntityIdList = [...new Set(rawAffiliations.map((a) => a.relatedEntityId))];
-    const relatedEntitiesRows = relatedEntityIdList.length > 0
-      ? await db.select().from(entities).where(inArray(entities.id, relatedEntityIdList))
-      : [];
-    const relatedEntityMap = new Map(relatedEntitiesRows.map((e) => [e.id, e]));
+    const relatedEntityMap = entityById; // same Map covers related entities too
 
     // ── Step 7b: Build accountability chains ─────────────────────────────────
     const accountabilityChains: string[] = [];
@@ -418,13 +420,13 @@ export async function action({ request }: ActionFunctionArgs) {
         .map((ae) => ae.entityId);
 
       for (const eid of eventEntityIds) {
-        const entity = allEntitiesForLookup.find((e) => e.id === eid);
+        const entity = entityById.get(eid);
         if (!entity) continue;
 
         const responsiblePersons = rawAffiliations
           .filter((a) => a.relatedEntityId === eid && affiliationActiveInYear(a, eventYear))
           .map((a) => {
-            const subject = allEntitiesForLookup.find((e) => e.id === a.entityId);
+            const subject = entityById.get(a.entityId);
             if (!subject || subject.type !== "person") return null;
             return `${subject.name} (${a.role ?? a.affiliationType} of ${entity.name} in ${eventYear})`;
           })
@@ -467,12 +469,11 @@ export async function action({ request }: ActionFunctionArgs) {
 
     // Build affiliation context — show ALL affiliations for matched entities,
     // clearly marking which were active vs inactive during mentioned years.
-    const allEntitiesMap = new Map([...uniqueEntities, ...neighborEntities].map((e) => [e.id, e]));
     const affiliationContext = allAffiliations.length > 0
       ? allAffiliations
           .map(({ aff, subjectName, subjectType }) => {
-            const related = relatedEntityMap.get(aff.relatedEntityId);
-            const subject = subjectName ?? allEntitiesMap.get(aff.entityId)?.name ?? aff.entityId;
+            const related = entityById.get(aff.relatedEntityId);
+            const subject = subjectName ?? entityById.get(aff.entityId)?.name ?? aff.entityId;
             const relatedName = related?.name ?? aff.relatedEntityId;
             const period = aff.startDate || aff.endDate
               ? `[${aff.startDate ?? "?"}–${aff.endDate ?? "present"}]`

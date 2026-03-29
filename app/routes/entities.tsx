@@ -1,4 +1,4 @@
-import type { LoaderFunctionArgs } from "@react-router/node";
+import type { LoaderFunctionArgs } from "react-router";
 import { useLoaderData, Link, Form, useSearchParams } from "react-router";
 import { like, eq, and } from "drizzle-orm";
 import { getDb } from "~/lib/db/client";

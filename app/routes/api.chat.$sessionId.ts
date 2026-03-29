@@ -1,4 +1,4 @@
-import type { LoaderFunctionArgs } from "@react-router/node";
+import type { LoaderFunctionArgs } from "react-router";
 import { pipelineEmitter, type PipelineEvent } from "~/lib/sse/emitter";
 
 // GET /api/chat/:sessionId — Server-Sent Events stream for real-time pipeline progress
