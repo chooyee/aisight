@@ -493,6 +493,7 @@ interface ChatMessage {
   context?: {
     entitiesFound: number;
     eventsFound: number;
+    affiliationsFound: number;
     relationshipsFound: number;
     riskSignalsFound: number;
     webResultsUsed: number;

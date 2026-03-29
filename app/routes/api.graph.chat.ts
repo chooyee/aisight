@@ -8,6 +8,7 @@ import {
   articles,
   articleEntities,
   riskSignals,
+  entityAffiliations,
 } from "~/lib/db/schema";
 import { logger } from "~/lib/logger";
 
@@ -139,12 +140,79 @@ export async function action({ request }: ActionFunctionArgs) {
           .limit(20)
       : [];
 
-    // ── Step 6: Fetch 1-hop neighbour entities ────────────────────────────────
+    // ── Step 5b: Extract year context from the question ──────────────────────
+    // Used to filter affiliations temporally (e.g. "who was CEO in 2017?")
+
+    const yearMatches = question.match(/\b(19|20)\d{2}\b/g);
+    const mentionedYears = yearMatches ? [...new Set(yearMatches.map(Number))].sort() : [];
+
+    // Returns true if an affiliation was active during a given year.
+    // Dates are stored as text: "YYYY", "YYYY-MM", or "YYYY-MM-DD".
+    function affiliationActiveInYear(
+      aff: { startDate: string | null; endDate: string | null; isCurrent: boolean },
+      year: number
+    ): boolean {
+      const startYear = aff.startDate ? parseInt(aff.startDate.slice(0, 4)) : null;
+      const endYear = aff.endDate ? parseInt(aff.endDate.slice(0, 4)) : null;
+      if (startYear !== null && startYear > year) return false;
+      if (endYear !== null && endYear < year) return false;
+      return true;
+    }
+
+    // ── Step 6: Fetch affiliations for matched entities (both directions) ─────
+    // "outgoing": this entity held a role at another entity
+    // "incoming": another entity held a role at/in this entity (e.g. person→company)
+
+    const allAffiliations = matchedEntityIds.size > 0
+      ? await db
+          .select({
+            aff: entityAffiliations,
+            subjectName: entities.name,
+            subjectType: entities.type,
+            subjectId: entities.id,
+          })
+          .from(entityAffiliations)
+          .leftJoin(entities, eq(entityAffiliations.entityId, entities.id))
+          .where(
+            or(
+              inArray(entityAffiliations.entityId, [...matchedEntityIds]),
+              inArray(entityAffiliations.relatedEntityId, [...matchedEntityIds])
+            )
+          )
+      : [];
+
+    // Fetch the related-entity names too (for display in context)
+    const affiliationRelatedIds = new Set(allAffiliations.map((r) => r.aff.relatedEntityId));
+    const affiliationRelatedEntities = affiliationRelatedIds.size > 0
+      ? await db.select({ id: entities.id, name: entities.name, type: entities.type })
+          .from(entities)
+          .where(inArray(entities.id, [...affiliationRelatedIds]))
+      : [];
+    const relatedEntityMap = new Map(affiliationRelatedEntities.map((e) => [e.id, e]));
+
+    // Split into year-relevant (if years mentioned) vs all
+    const temporallyRelevantAffiliations = mentionedYears.length > 0
+      ? allAffiliations.filter((r) =>
+          mentionedYears.some((yr) => affiliationActiveInYear(r.aff, yr))
+        )
+      : allAffiliations;
+
+    // Collect affiliated entity IDs to include in subgraph
+    const affiliationEntityIds = new Set<string>();
+    for (const { aff } of temporallyRelevantAffiliations) {
+      affiliationEntityIds.add(aff.entityId);
+      affiliationEntityIds.add(aff.relatedEntityId);
+    }
+
+    // ── Step 6b: Fetch 1-hop neighbour entities (relationships + affiliations) ─
 
     const neighborEntityIds = new Set<string>();
     for (const r of relevantRelationships) {
       if (!matchedEntityIds.has(r.fromEntityId)) neighborEntityIds.add(r.fromEntityId);
       if (!matchedEntityIds.has(r.toEntityId)) neighborEntityIds.add(r.toEntityId);
+    }
+    for (const id of affiliationEntityIds) {
+      if (!matchedEntityIds.has(id)) neighborEntityIds.add(id);
     }
     const neighborEntities = neighborEntityIds.size > 0
       ? await db.select().from(entities)
@@ -186,6 +254,33 @@ export async function action({ request }: ActionFunctionArgs) {
       })
       .join("\n");
 
+    // Build affiliation context — show ALL affiliations for matched entities,
+    // clearly marking which were active vs inactive during mentioned years.
+    const allEntitiesMap = new Map([...uniqueEntities, ...neighborEntities].map((e) => [e.id, e]));
+    const affiliationContext = allAffiliations.length > 0
+      ? allAffiliations
+          .map(({ aff, subjectName, subjectType }) => {
+            const related = relatedEntityMap.get(aff.relatedEntityId);
+            const subject = subjectName ?? allEntitiesMap.get(aff.entityId)?.name ?? aff.entityId;
+            const relatedName = related?.name ?? aff.relatedEntityId;
+            const period = aff.startDate || aff.endDate
+              ? `[${aff.startDate ?? "?"}–${aff.endDate ?? "present"}]`
+              : aff.isCurrent ? "[current]" : "[dates unknown]";
+
+            // Check temporal relevance against mentioned years
+            let temporalNote = "";
+            if (mentionedYears.length > 0) {
+              const activeYears = mentionedYears.filter((yr) => affiliationActiveInYear(aff, yr));
+              const inactiveYears = mentionedYears.filter((yr) => !affiliationActiveInYear(aff, yr));
+              if (activeYears.length > 0) temporalNote = ` ← ACTIVE in ${activeYears.join(", ")}`;
+              else if (inactiveYears.length > 0) temporalNote = ` ← NOT active in ${inactiveYears.join(", ")}`;
+            }
+
+            return `- ${subject} (${subjectType ?? "?"}) was ${aff.role ?? aff.affiliationType} of ${relatedName} ${period}${temporalNote}`;
+          })
+          .join("\n")
+      : "";
+
     const eventContext = relevantEvents
       .map((e) => {
         const date = e.occurredAt ? new Date(e.occurredAt).toISOString().split("T")[0] : "unknown date";
@@ -201,17 +296,26 @@ export async function action({ request }: ActionFunctionArgs) {
       ? webResults.map((r) => `- "${r.title}" (${r.url}): ${r.content.slice(0, 300)}`).join("\n")
       : "";
 
+    const temporalInstruction = mentionedYears.length > 0
+      ? `IMPORTANT: The question mentions specific year(s): ${mentionedYears.join(", ")}. When attributing actions or responsibility, you MUST use the affiliation history below to identify WHO held the relevant role during that period — not who holds it now. Lines marked "← ACTIVE in YYYY" identify the correct person. Lines marked "← NOT active in YYYY" must NOT be cited as responsible for events in that year.`
+      : "";
+
     const prompt = `You are an intelligence analyst assistant for a Central Bank supervisor.
-You have access to a knowledge graph of financial entities, events, and risk signals.
-Answer the user's question using the provided context. Be specific, cite sources when possible.
-If the knowledge graph has limited information, say so clearly. If web search results are provided, incorporate them but distinguish between local knowledge and web findings.
+You have access to a knowledge graph of financial entities, events, risk signals, and a verified affiliation history (who held which role at which organisation and when).
+Answer the user's question using the provided context. Be specific and cite sources when possible.
+If the knowledge graph has limited information, say so clearly.
+
+${temporalInstruction}
 
 ## Knowledge Graph Context
 
 ### Entities Found (${uniqueEntities.length})
 ${entityContext || "None found matching the query."}
 
-### Relationships (${relevantRelationships.length})
+### Affiliation History (${allAffiliations.length} records)
+${affiliationContext || "No affiliation records found for these entities."}
+
+### AI-Extracted Relationships (${relevantRelationships.length})
 ${relationshipContext || "None found."}
 
 ### Events (${relevantEvents.length})
@@ -225,7 +329,7 @@ ${webContext ? `### Web Search Results\n${webContext}` : ""}
 ## User Question
 ${question}
 
-Respond in a clear, structured format. Use bullet points for lists. Mention entity types and dates where relevant. If you reference a web search result, include the URL.`;
+Respond in a clear, structured format. Use bullet points for lists. Always state the person's role AND the time period when attributing responsibility. If you reference a web search result, include the URL.`;
 
     const model = getAI().getGenerativeModel({
       model: "gemini-3-flash-preview",
@@ -274,6 +378,26 @@ Respond in a clear, structured format. Use bullet points for lists. Mention enti
         },
       }));
 
+    // Affiliation edges — only those temporally relevant to the question
+    const affiliationEdges = temporallyRelevantAffiliations
+      .filter((r) => allSubgraphEntityIds.has(r.aff.entityId) && allSubgraphEntityIds.has(r.aff.relatedEntityId))
+      .map(({ aff }) => {
+        const label = aff.role
+          ? aff.isCurrent ? aff.role : `${aff.role} (past)`
+          : aff.affiliationType;
+        return {
+          data: {
+            id: `aff_${aff.id}`,
+            source: aff.entityId,
+            target: aff.relatedEntityId,
+            label,
+            edgeType: "affiliation" as const,
+            isCurrent: aff.isCurrent,
+            weight: null,
+          },
+        };
+      });
+
     // Build involvement edges from the already-filtered articleEntities
     const articleToEventIds = new Map<string, string[]>();
     for (const ev of relevantEvents) {
@@ -308,6 +432,7 @@ Respond in a clear, structured format. Use bullet points for lists. Mention enti
       context: {
         entitiesFound: uniqueEntities.length,
         eventsFound: relevantEvents.length,
+        affiliationsFound: allAffiliations.length,
         relationshipsFound: relevantRelationships.length,
         riskSignalsFound: relevantRiskSignals.length,
         webResultsUsed: webResults.length,
@@ -317,7 +442,7 @@ Respond in a clear, structured format. Use bullet points for lists. Mention enti
       // Complete subgraph for the frontend to render — only what's needed
       subgraph: {
         nodes: [...entityNodes, ...eventNodes],
-        edges: [...relEdges, ...involvementEdges],
+        edges: [...relEdges, ...affiliationEdges, ...involvementEdges],
       },
     });
   } catch (err) {
