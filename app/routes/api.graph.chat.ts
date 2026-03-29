@@ -1,5 +1,5 @@
 import type { ActionFunctionArgs } from "@react-router/node";
-import { eq, like, or, inArray } from "drizzle-orm";
+import { eq, inArray, like, or } from "drizzle-orm";
 import { getDb } from "~/lib/db/client";
 import {
   entities,
@@ -10,6 +10,9 @@ import {
   riskSignals,
   entityAffiliations,
 } from "~/lib/db/schema";
+import type { EntitySearchCandidate } from "~/lib/graphChat/search";
+import { clearPendingResolution, getPendingResolution, setPendingResolution } from "~/lib/graphChat/sessionState";
+import { buildQueryProfile, findEntityCandidates, resolveCandidateSelection } from "~/lib/graphChat/search";
 import { logger } from "~/lib/logger";
 
 // Reuse the Gemini setup from geminiExtract
@@ -58,13 +61,119 @@ function getAI() {
   return _ai;
 }
 
+type GraphChatResolution = {
+  mode: "resolved" | "ambiguous" | "no_match";
+  kind: "entity" | "event" | "none";
+  candidates?: Array<{
+    id: string;
+    name: string;
+    type: string;
+    sector: string | null;
+    country: string | null;
+    score: number;
+  }>;
+};
+
+function createEntityDisambiguationResponse(
+  sessionId: string,
+  question: string,
+  candidates: EntitySearchCandidate[],
+) {
+  setPendingResolution(sessionId, candidates);
+
+  const answer = [
+    `I found several close matches for "${question.trim()}" in the graph.`,
+    "Choose one so I can focus the answer and highlight the right part of the graph:",
+    ...candidates.map((candidate, index) => {
+      const details = [candidate.type, candidate.sector, candidate.country].filter(Boolean).join(" | ");
+      return `${index + 1}. ${candidate.name}${details ? ` (${details})` : ""}`;
+    }),
+  ].join("\n");
+
+  return Response.json({
+    answer,
+    context: {
+      entitiesFound: candidates.length,
+      eventsFound: 0,
+      relationshipsFound: 0,
+      riskSignalsFound: 0,
+      webResultsUsed: 0,
+    },
+    highlightEntityIds: candidates.map((candidate) => candidate.id),
+    highlightEventIds: [],
+    resolution: {
+      mode: "ambiguous",
+      kind: "entity",
+      candidates: candidates.map(({ id, name, type, sector, country, score }) => ({
+        id,
+        name,
+        type,
+        sector,
+        country,
+        score,
+      })),
+    } satisfies GraphChatResolution,
+  });
+}
+
+function createNoMatchResponse(answer: string) {
+  return Response.json({
+    answer,
+    context: {
+      entitiesFound: 0,
+      eventsFound: 0,
+      relationshipsFound: 0,
+      riskSignalsFound: 0,
+      webResultsUsed: 0,
+    },
+    highlightEntityIds: [],
+    highlightEventIds: [],
+    resolution: {
+      mode: "no_match",
+      kind: "none",
+    } satisfies GraphChatResolution,
+  });
+}
+
+function buildEventKeywordFilter(question: string) {
+  const profile = buildQueryProfile(question);
+  const keywords = [...profile.phrases, ...profile.terms].slice(0, 6).map((term) => term.normalized).filter(Boolean);
+  if (keywords.length === 0) return null;
+
+  return or(
+    ...keywords.flatMap((keyword) => [
+      like(events.description, `%${keyword}%`),
+      like(articles.title, `%${keyword}%`),
+      like(riskSignals.riskType, `%${keyword}%`),
+      like(riskSignals.rationale, `%${keyword}%`),
+    ])
+  );
+}
+
+function scoreEventText(question: string, textParts: Array<string | null>) {
+  const profile = buildQueryProfile(question);
+  const haystack = textParts.filter(Boolean).join(" ").toLowerCase();
+  if (!haystack) return 0;
+
+  let hits = 0;
+  for (const term of [...profile.phrases, ...profile.terms]) {
+    if (term.normalized && haystack.includes(term.normalized)) hits += 1;
+  }
+  if (hits === 0) return 0;
+  return hits / Math.max(profile.terms.length || 1, 1);
+}
+
 export async function action({ request }: ActionFunctionArgs) {
   if (request.method !== "POST") {
     return Response.json({ error: "Method not allowed" }, { status: 405 });
   }
 
   const body = await request.json();
-  const { question, enableWebSearch } = body as { question: string; enableWebSearch?: boolean };
+  const { question, enableWebSearch, sessionId } = body as {
+    question: string;
+    enableWebSearch?: boolean;
+    sessionId?: string;
+  };
 
   if (!question || typeof question !== "string" || question.trim().length === 0) {
     return Response.json({ error: "Question is required" }, { status: 400 });
@@ -72,38 +181,69 @@ export async function action({ request }: ActionFunctionArgs) {
 
   try {
     const db = getDb();
+    const activeSessionId = sessionId?.trim();
+
+    let resolvedEntityIds: string[] = [];
+
+    if (activeSessionId) {
+      const pending = getPendingResolution(activeSessionId);
+      if (pending) {
+        const resolved = resolveCandidateSelection(question, pending.candidates);
+        if (resolved.candidate) {
+          resolvedEntityIds = [resolved.candidate.id];
+          clearPendingResolution(activeSessionId);
+        } else if (resolved.stillAmbiguous) {
+          return createEntityDisambiguationResponse(activeSessionId, question, pending.candidates);
+        }
+      }
+    }
 
     // ── Step 1: Keyword-match entities ───────────────────────────────────────
 
-    const keywords = question
-      .toLowerCase()
-      .split(/\s+/)
-      .filter((w) => w.length > 2)
-      .slice(0, 5);
+    if (resolvedEntityIds.length === 0) {
+      const allEntities = await db.select().from(entities);
+      const rankedEntities = findEntityCandidates(question, allEntities, 8);
+      const [best, second] = rankedEntities;
 
-    const matchedEntities = [];
-    for (const kw of keywords) {
-      const results = await db
-        .select()
-        .from(entities)
-        .where(like(entities.name, `%${kw}%`))
-        .limit(10);
-      matchedEntities.push(...results);
+      if (best && best.score >= 0.88 && (!second || best.score - second.score >= 0.08)) {
+        resolvedEntityIds = [best.id];
+        if (activeSessionId) clearPendingResolution(activeSessionId);
+      } else if (best && best.score >= 0.68 && second && best.score - second.score < 0.08 && activeSessionId) {
+        return createEntityDisambiguationResponse(activeSessionId, question, rankedEntities.slice(0, 5));
+      }
     }
-    const uniqueEntities = [...new Map(matchedEntities.map((e) => [e.id, e])).values()].slice(0, 15);
-    const matchedEntityIds = new Set(uniqueEntities.map((e) => e.id));
 
-    // ── Step 2: Fetch only articleEntities rows for matched entities ──────────
+    const relatedArticleIds = new Set<string>();
 
-    const matchedAE = matchedEntityIds.size > 0
-      ? await db.select().from(articleEntities)
-          .where(inArray(articleEntities.entityId, [...matchedEntityIds]))
+    const uniqueEntities = resolvedEntityIds.length > 0
+      ? await db.select().from(entities).where(inArray(entities.id, resolvedEntityIds))
       : [];
-    const relevantArticleIds = new Set(matchedAE.map((ae) => ae.articleId));
 
-    // ── Step 3: Fetch events only for those articles ──────────────────────────
+    const relevantRelationships = resolvedEntityIds.length > 0
+      ? await db
+          .select()
+          .from(relationships)
+          .where(
+            or(
+              inArray(relationships.fromEntityId, resolvedEntityIds),
+              inArray(relationships.toEntityId, resolvedEntityIds)
+            )
+          )
+          .limit(40)
+      : [];
 
-    const relevantEvents = relevantArticleIds.size > 0
+    const relevantArticleEntities = resolvedEntityIds.length > 0
+      ? await db
+          .select()
+          .from(articleEntities)
+          .where(inArray(articleEntities.entityId, resolvedEntityIds))
+      : [];
+
+    for (const row of relevantArticleEntities) {
+      relatedArticleIds.add(row.articleId);
+    }
+
+    let relevantEvents = relatedArticleIds.size > 0
       ? await db
           .select({
             id: events.id,
@@ -116,160 +256,85 @@ export async function action({ request }: ActionFunctionArgs) {
           })
           .from(events)
           .leftJoin(articles, eq(events.articleId, articles.id))
-          .where(inArray(events.articleId, [...relevantArticleIds]))
+          .where(inArray(events.articleId, [...relatedArticleIds]))
           .limit(20)
       : [];
 
-    // ── Step 4: Fetch relationships for matched entities only ─────────────────
-
-    const relevantRelationships = matchedEntityIds.size > 0
-      ? await db.select().from(relationships).where(
-          or(
-            inArray(relationships.fromEntityId, [...matchedEntityIds]),
-            inArray(relationships.toEntityId, [...matchedEntityIds])
-          )
-        )
-      : [];
-
-    // ── Step 5: Fetch risk signals for context ────────────────────────────────
-
-    const relevantEventIds = new Set(relevantEvents.map((e) => e.id));
-    const relevantRiskSignals = relevantEventIds.size > 0
-      ? await db.select().from(riskSignals)
-          .where(inArray(riskSignals.eventId, [...relevantEventIds]))
-          .limit(20)
-      : [];
-
-    // ── Step 5b: Extract year context from the question ──────────────────────
-    // Used to filter affiliations temporally (e.g. "who was CEO in 2017?")
-
-    const yearMatches = question.match(/\b(19|20)\d{2}\b/g);
-    const mentionedYears = yearMatches ? [...new Set(yearMatches.map(Number))].sort() : [];
-
-    // Returns true if an affiliation was active during a given year.
-    // Dates are stored as text: "YYYY", "YYYY-MM", or "YYYY-MM-DD".
-    function affiliationActiveInYear(
-      aff: { startDate: string | null; endDate: string | null; isCurrent: boolean },
-      year: number
-    ): boolean {
-      const startYear = aff.startDate ? parseInt(aff.startDate.slice(0, 4)) : null;
-      const endYear = aff.endDate ? parseInt(aff.endDate.slice(0, 4)) : null;
-      if (startYear !== null && startYear > year) return false;
-      if (endYear !== null && endYear < year) return false;
-      return true;
-    }
-
-    // ── Step 6: Fetch affiliations for matched entities (both directions) ─────
-    // "outgoing": this entity held a role at another entity
-    // "incoming": another entity held a role at/in this entity (e.g. person→company)
-
-    const allAffiliations = matchedEntityIds.size > 0
+    let relevantRiskSignals = relevantEvents.length > 0
       ? await db
+          .select()
+          .from(riskSignals)
+          .where(inArray(riskSignals.eventId, relevantEvents.map((event) => event.id)))
+          .limit(20)
+      : [];
+
+    if (uniqueEntities.length === 0) {
+      const eventFilter = buildEventKeywordFilter(question);
+      if (eventFilter) {
+        const fallbackRows = await db
           .select({
-            aff: entityAffiliations,
-            subjectName: entities.name,
-            subjectType: entities.type,
-            subjectId: entities.id,
+            id: events.id,
+            articleId: events.articleId,
+            description: events.description,
+            eventType: events.eventType,
+            occurredAt: events.occurredAt,
+            articleTitle: articles.title,
+            articleUrl: articles.url,
+            riskType: riskSignals.riskType,
+            riskRationale: riskSignals.rationale,
           })
-          .from(entityAffiliations)
-          .leftJoin(entities, eq(entityAffiliations.entityId, entities.id))
-          .where(
-            or(
-              inArray(entityAffiliations.entityId, [...matchedEntityIds]),
-              inArray(entityAffiliations.relatedEntityId, [...matchedEntityIds])
-            )
-          )
-      : [];
+          .from(events)
+          .leftJoin(articles, eq(events.articleId, articles.id))
+          .leftJoin(riskSignals, eq(riskSignals.eventId, events.id))
+          .where(eventFilter)
+          .limit(30);
 
-    // Fetch the related-entity names too (for display in context)
-    const affiliationRelatedIds = new Set(allAffiliations.map((r) => r.aff.relatedEntityId));
-    const affiliationRelatedEntities = affiliationRelatedIds.size > 0
-      ? await db.select({ id: entities.id, name: entities.name, type: entities.type })
-          .from(entities)
-          .where(inArray(entities.id, [...affiliationRelatedIds]))
-      : [];
-    const relatedEntityMap = new Map(affiliationRelatedEntities.map((e) => [e.id, e]));
+        const rankedEvents = fallbackRows
+          .map((row) => ({
+            row,
+            score: scoreEventText(question, [row.description, row.articleTitle, row.eventType, row.riskType, row.riskRationale]),
+          }))
+          .filter((entry) => entry.score >= 0.34)
+          .sort((left, right) => right.score - left.score);
 
-    // Split into year-relevant (if years mentioned) vs all
-    const temporallyRelevantAffiliations = mentionedYears.length > 0
-      ? allAffiliations.filter((r) =>
-          mentionedYears.some((yr) => affiliationActiveInYear(r.aff, yr))
-        )
-      : allAffiliations;
+        const dedupedEvents = [...new Map(rankedEvents.map((entry) => [entry.row.id, entry.row])).values()].slice(0, 10);
+        relevantEvents = dedupedEvents.map(({ riskType: _riskType, riskRationale: _riskRationale, ...event }) => event);
 
-    // Collect affiliated entity IDs to include in subgraph
-    const affiliationEntityIds = new Set<string>();
-    for (const { aff } of temporallyRelevantAffiliations) {
-      affiliationEntityIds.add(aff.entityId);
-      affiliationEntityIds.add(aff.relatedEntityId);
-    }
-
-    // ── Step 6b: Fetch 1-hop neighbour entities (relationships + affiliations) ─
-
-    const neighborEntityIds = new Set<string>();
-    for (const r of relevantRelationships) {
-      if (!matchedEntityIds.has(r.fromEntityId)) neighborEntityIds.add(r.fromEntityId);
-      if (!matchedEntityIds.has(r.toEntityId)) neighborEntityIds.add(r.toEntityId);
-    }
-    for (const id of affiliationEntityIds) {
-      if (!matchedEntityIds.has(id)) neighborEntityIds.add(id);
-    }
-    const neighborEntities = neighborEntityIds.size > 0
-      ? await db.select().from(entities)
-          .where(inArray(entities.id, [...neighborEntityIds]))
-      : [];
-
-    const allSubgraphEntities = [...uniqueEntities, ...neighborEntities];
-    const allSubgraphEntityIds = new Set(allSubgraphEntities.map((e) => e.id));
-
-    // ── Step 6c: Pre-compute accountability chains ────────────────────────────
-    // For each event, resolve: WHICH person held a leadership role at the
-    // involved entity AT THE TIME the event occurred.
-    // This gives Gemini a pre-computed chain so it doesn't have to guess.
-
-    const accountabilityChains: string[] = [];
-    for (const ev of relevantEvents.slice(0, 15)) {
-      const eventDate = ev.occurredAt ? new Date(ev.occurredAt) : null;
-      const eventYear = eventDate?.getFullYear() ?? null;
-      const eventDateStr = eventDate ? eventDate.toISOString().split("T")[0] : "unknown date";
-
-      // Entities mentioned in the same article as this event
-      const entitiesInArticle = matchedAE
-        .filter((ae) => ae.articleId === ev.articleId)
-        .map((ae) => ae.entityId)
-        .slice(0, 3);
-
-      for (const entityId of entitiesInArticle) {
-        const entity = allSubgraphEntities.find((e) => e.id === entityId);
-        if (!entity) continue;
-
-        // People who held employment/board roles at this entity at the event time
-        const leaders = allAffiliations.filter(({ aff }) => {
-          // Must be an "incoming" affiliation — person/entity → this company
-          if (aff.relatedEntityId !== entityId) return false;
-          if (!["employment", "board"].includes(aff.affiliationType)) return false;
-          if (eventYear && !affiliationActiveInYear(aff, eventYear)) return false;
-          return true;
-        });
-
-        if (leaders.length > 0) {
-          const leaderStr = leaders
-            .slice(0, 3)
-            .map(({ aff, subjectName }) => {
-              const period = aff.startDate || aff.endDate
-                ? ` [${aff.startDate ?? "?"}–${aff.endDate ?? "present"}]`
-                : "";
-              return `${subjectName ?? "?"} as ${aff.role ?? aff.affiliationType}${period}`;
-            })
-            .join("; ");
-          accountabilityChains.push(
-            `• [${eventDateStr}] "${ev.description?.slice(0, 100) ?? ev.eventType}" @ ${entity.name} — In charge: ${leaderStr}`
-          );
+        for (const event of relevantEvents) {
+          relatedArticleIds.add(event.articleId);
         }
+
+        if (relatedArticleIds.size > 0) {
+          const fallbackArticleEntities = await db
+            .select()
+            .from(articleEntities)
+            .where(inArray(articleEntities.articleId, [...relatedArticleIds]));
+
+          const fallbackEntityIds = [...new Set(fallbackArticleEntities.map((row) => row.entityId))].slice(0, 12);
+          if (fallbackEntityIds.length > 0) {
+            const linkedEntities = await db.select().from(entities).where(inArray(entities.id, fallbackEntityIds));
+            uniqueEntities.push(...linkedEntities);
+          }
+        }
+
+        relevantRiskSignals = relevantEvents.length > 0
+          ? await db
+              .select()
+              .from(riskSignals)
+              .where(inArray(riskSignals.eventId, relevantEvents.map((event) => event.id)))
+              .limit(20)
+          : [];
       }
     }
 
-    // ── Step 7: Fetch articleEntities for relevant articles (involvement edges) ─
+    if (uniqueEntities.length === 0 && relevantEvents.length === 0) {
+      if (activeSessionId) clearPendingResolution(activeSessionId);
+      return createNoMatchResponse(
+        "I couldn't confidently match that to an entity, event, or risk signal in the graph. Try a company, regulator, event keyword, or a shorter phrase."
+      );
+    }
+
+    const dedupedEntities = [...new Map(uniqueEntities.map((entity) => [entity.id, entity])).values()];
 
     const relevantAE = relevantArticleIds.size > 0
       ? await db.select().from(articleEntities)
@@ -348,16 +413,16 @@ export async function action({ request }: ActionFunctionArgs) {
       : "";
 
     const prompt = `You are an intelligence analyst assistant for a Central Bank supervisor.
-You have access to a knowledge graph including entities, events, risk signals, and a verified time-bounded affiliation history showing who held which role at which organisation and when.
+You have access to a knowledge graph of financial entities, events, and risk signals.
+  Answer the user's question using the provided context. Be specific, cite sources when possible.
+If the knowledge graph has limited information, say so clearly. If web search results are provided, incorporate them but distinguish between local knowledge and web findings.
 
-Your primary job when asked about causes, responsibility, or accountability: trace the chain from the event → the entity involved → the person who held the leadership role at that entity AT THE TIME of the event, using the Accountability Chains section below.
-
-${temporalInstruction}
+  The graph search has already resolved the user's input to the closest matching graph nodes. Do not ask the user to restate the name unless the provided context is obviously insufficient.
 
 ## Knowledge Graph Context
 
 ### Entities Found (${uniqueEntities.length})
-${entityContext || "None found matching the query."}
+${dedupedEntities.map((e) => `- ${e.name} (${e.type}${e.country ? `, ${e.country}` : ""}${e.sector ? `, sector: ${e.sector}` : ""})`).join("\n") || "None found matching the query."}
 
 ### Accountability Chains — Pre-resolved: Event → Entity → Person In Charge at Event Time (${accountabilityChains.length})
 ${accountabilityChains.length > 0 ? accountabilityChains.join("\n") : "No chains resolved — affiliation data may be incomplete for these entities."}
@@ -389,111 +454,25 @@ Answer in clear, structured format. When attributing responsibility, always stat
     const result = await model.generateContent(prompt);
     const answer = result.response.text();
 
-    // ── Step 10: Build subgraph for the frontend ──────────────────────────────
-
-    const entityNodes = allSubgraphEntities.map((e) => ({
-      data: {
-        id: e.id,
-        label: e.name,
-        nodeType: "entity" as const,
-        entityType: e.type,
-        sector: e.sector,
-        country: e.country,
-      },
-    }));
-
-    const eventNodes = relevantEvents.map((e) => ({
-      data: {
-        id: e.id,
-        label: e.description?.slice(0, 60) ?? e.eventType ?? "Event",
-        nodeType: "event" as const,
-        eventType: e.eventType ?? "other",
-        occurredAt: e.occurredAt ? new Date(e.occurredAt).toISOString() : null,
-        articleTitle: e.articleTitle ?? null,
-        articleUrl: e.articleUrl ?? null,
-        description: e.description ?? null,
-      },
-    }));
-
-    const relEdges = relevantRelationships
-      .filter((r) => allSubgraphEntityIds.has(r.fromEntityId) && allSubgraphEntityIds.has(r.toEntityId))
-      .map((r) => ({
-        data: {
-          id: r.id,
-          source: r.fromEntityId,
-          target: r.toEntityId,
-          label: r.relationshipType,
-          edgeType: "relationship" as const,
-          weight: r.weight,
-        },
-      }));
-
-    // Affiliation edges — only those temporally relevant to the question
-    const affiliationEdges = temporallyRelevantAffiliations
-      .filter((r) => allSubgraphEntityIds.has(r.aff.entityId) && allSubgraphEntityIds.has(r.aff.relatedEntityId))
-      .map(({ aff }) => {
-        const label = aff.role
-          ? aff.isCurrent ? aff.role : `${aff.role} (past)`
-          : aff.affiliationType;
-        return {
-          data: {
-            id: `aff_${aff.id}`,
-            source: aff.entityId,
-            target: aff.relatedEntityId,
-            label,
-            edgeType: "affiliation" as const,
-            isCurrent: aff.isCurrent,
-            weight: null,
-          },
-        };
-      });
-
-    // Build involvement edges from the already-filtered articleEntities
-    const articleToEventIds = new Map<string, string[]>();
-    for (const ev of relevantEvents) {
-      if (!articleToEventIds.has(ev.articleId)) articleToEventIds.set(ev.articleId, []);
-      articleToEventIds.get(ev.articleId)!.push(ev.id);
-    }
-    const seenPairs = new Set<string>();
-    const involvementEdges: { data: { id: string; source: string; target: string; label: string; edgeType: "relationship" | "involvement" | "affiliation"; weight: number | null } }[] = [];
-    for (const ae of relevantAE) {
-      if (!allSubgraphEntityIds.has(ae.entityId)) continue;
-      const evIds = articleToEventIds.get(ae.articleId);
-      if (!evIds) continue;
-      for (const evId of evIds) {
-        const key = `${ae.entityId}:${evId}`;
-        if (seenPairs.has(key)) continue;
-        seenPairs.add(key);
-        involvementEdges.push({
-          data: {
-            id: `inv_${ae.entityId}_${evId}`,
-            source: ae.entityId,
-            target: evId,
-            label: "involved_in",
-            edgeType: "involvement" as const,
-            weight: null,
-          },
-        });
-      }
-    }
+    if (activeSessionId) clearPendingResolution(activeSessionId);
 
     return Response.json({
       answer,
       context: {
-        entitiesFound: uniqueEntities.length,
+        entitiesFound: dedupedEntities.length,
         eventsFound: relevantEvents.length,
         affiliationsFound: allAffiliations.length,
         relationshipsFound: relevantRelationships.length,
         riskSignalsFound: relevantRiskSignals.length,
         webResultsUsed: webResults.length,
       },
-      highlightEntityIds: uniqueEntities.map((e) => e.id),
+      // Return entity IDs so the frontend can highlight them in the graph
+      highlightEntityIds: dedupedEntities.map((e) => e.id),
       highlightEventIds: relevantEvents.map((e) => e.id),
-      // Complete subgraph for the frontend to render — only what's needed
-      subgraph: {
-        nodes: [...entityNodes, ...eventNodes],
-        edges: [...relEdges, ...affiliationEdges, ...involvementEdges],
-      },
+      resolution: {
+        mode: "resolved",
+        kind: dedupedEntities.length > 0 ? "entity" : "event",
+      } satisfies GraphChatResolution,
     });
   } catch (err) {
     logger.error({ err }, "Graph chat failed");
