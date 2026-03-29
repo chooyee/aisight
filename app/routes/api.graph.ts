@@ -1,7 +1,7 @@
 import type { LoaderFunctionArgs } from "@react-router/node";
-import { eq, and, or, gte, lt, isNull } from "drizzle-orm";
+import { eq, and, or, gte, lt, isNull, inArray } from "drizzle-orm";
 import { getDb } from "~/lib/db/client";
-import { entities, relationships, events, articleEntities, articles } from "~/lib/db/schema";
+import { entities, relationships, events, articleEntities, articles, entityAffiliations } from "~/lib/db/schema";
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const url = new URL(request.url);
@@ -58,8 +58,6 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const eventIds = new Set(eventRows.map((e) => e.id));
 
   // ── Step 3: Derive which entities are relevant to the filtered events ──────
-  // When a time filter is active, only show entities that appear in at least
-  // one article that has a matching event. Prevents orphaned entity nodes.
   const aeRows = await db.select().from(articleEntities);
 
   let activeEntityIds: Set<string> | null = null;
@@ -72,17 +70,38 @@ export async function loader({ request }: LoaderFunctionArgs) {
     );
   }
 
-  // ── Step 4: Fetch entities, optionally filtered by sector + active set ─────
-  const allEntityRows = await db
-    .select()
-    .from(entities)
-    .where(sector ? eq(entities.sector, sector) : undefined);
+  // ── Step 3b: Expand entity set with affiliation-linked persons ────────────
 
-  // When time filter is active, drop entities not connected to any filtered event
-  const entityRows = activeEntityIds
-    ? allEntityRows.filter((e) => activeEntityIds!.has(e.id))
-    : allEntityRows;
+  function affActiveInYear(
+    aff: { startDate: string | null; endDate: string | null; isCurrent: boolean },
+    y: number
+  ): boolean {
+    const s = aff.startDate ? parseInt(aff.startDate.slice(0, 4)) : null;
+    const e = aff.endDate ? parseInt(aff.endDate.slice(0, 4)) : null;
+    if (s !== null && s > y) return false;
+    if (e !== null && e < y) return false;
+    return true;
+  }
 
+  const allAffRows = await db.select().from(entityAffiliations);
+  const filterYear = year ? parseInt(year, 10) : null;
+
+  if (filterYear !== null && activeEntityIds) {
+    for (const a of allAffRows) {
+      if (!affActiveInYear(a, filterYear)) continue;
+      if (activeEntityIds.has(a.entityId)) activeEntityIds.add(a.relatedEntityId);
+      else if (activeEntityIds.has(a.relatedEntityId)) activeEntityIds.add(a.entityId);
+    }
+  }
+
+  // ── Step 4: Fetch entities ────────────────────────────────────────────────
+  const allEntityRows = activeEntityIds && activeEntityIds.size > 0
+    ? await db.select().from(entities).where(inArray(entities.id, [...activeEntityIds]))
+    : activeEntityIds
+      ? []
+      : await db.select().from(entities).where(sector ? eq(entities.sector, sector) : undefined).limit(300);
+
+  const entityRows = allEntityRows;
   const nodeIds = new Set(entityRows.map((e) => e.id));
 
   // Build event nodes
@@ -111,8 +130,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     },
   }));
 
-  // ── Step 5: Relationship edges (entity↔entity) ────────────────────────────
-  // nodeIds already reflects the filtered entity set, so this auto-filters.
+  // ── Step 5: Relationship edges (entity↔entity, AI-extracted) ─────────────
   const relRows = await db.select().from(relationships);
   const relEdges = relRows
     .filter((r) => nodeIds.has(r.fromEntityId) && nodeIds.has(r.toEntityId))
@@ -126,6 +144,34 @@ export async function loader({ request }: LoaderFunctionArgs) {
         weight: r.weight,
       },
     }));
+
+  // ── Step 5b: Affiliation edges (time-filtered) ───────────────────────────
+  // When year filter is active: only show affiliations active in that year.
+  // isCurrent on the edge means "was active in the filtered year" (drives style).
+  const affiliationEdges = allAffRows
+    .filter((a) => {
+      if (!nodeIds.has(a.entityId) || !nodeIds.has(a.relatedEntityId)) return false;
+      if (filterYear !== null) return affActiveInYear(a, filterYear);
+      return true;
+    })
+    .map((a) => {
+      const activeInFilter = filterYear !== null ? affActiveInYear(a, filterYear) : a.isCurrent;
+      const label = a.role
+        ? activeInFilter ? a.role : `${a.role} (past)`
+        : a.affiliationType;
+      return {
+        data: {
+          id: `aff_${a.id}`,
+          source: a.entityId,
+          target: a.relatedEntityId,
+          label,
+          edgeType: "affiliation" as const,
+          isCurrent: activeInFilter,
+          ownershipPct: a.ownershipPct,
+          affiliationType: a.affiliationType,
+        },
+      };
+    });
 
   // ── Step 6: Involvement edges (entity↔event via shared article) ───────────
 
@@ -179,7 +225,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
   }
 
   const nodes = [...entityNodes, ...eventNodes];
-  const edges = [...relEdges, ...involvementEdges];
+  const edges = [...relEdges, ...affiliationEdges, ...involvementEdges];
 
   return Response.json(
     {
@@ -188,6 +234,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
       entityCount: entityNodes.length,
       eventCount: eventNodes.length,
       edgeCount: edges.length,
+      affiliationEdgeCount: affiliationEdges.length,
     },
     { headers: { "Cache-Control": "max-age=60" } }
   );

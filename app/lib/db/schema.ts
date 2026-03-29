@@ -196,3 +196,70 @@ export const eventExtractionItems = sqliteTable("event_extraction_items", {
     .references(() => extractionItems.id),
   valueJson: text("value_json"), // JSON result from Gemini
 });
+
+// ── Entity enrichment ─────────────────────────────────────────────────────────
+
+// Extended metadata for each entity — one row per entity, upserted on edit.
+export const entityProfiles = sqliteTable("entity_profiles", {
+  id: text("id").primaryKey(),
+  entityId: text("entity_id")
+    .notNull()
+    .unique()
+    .references(() => entities.id, { onDelete: "cascade" }),
+  // Common fields
+  aliases: text("aliases"),          // JSON string[] — alternative names / abbreviations
+  description: text("description"),  // Free-text bio / company overview
+  website: text("website"),
+  notes: text("notes"),              // Internal analyst notes
+  // Person-specific
+  dateOfBirth: text("date_of_birth"), // "YYYY", "YYYY-MM", or "YYYY-MM-DD"
+  nationality: text("nationality"),
+  gender: text("gender"),            // 'male' | 'female' | 'other'
+  // Company/Regulator-specific
+  registrationNo: text("registration_no"),   // e.g. company reg number
+  incorporatedDate: text("incorporated_date"),
+  jurisdiction: text("jurisdiction"),        // e.g. "Malaysia", "Labuan"
+  listedExchange: text("listed_exchange"),   // e.g. "Bursa Malaysia"
+  listedDate: text("listed_date"),
+  // Metadata
+  researchedAt: integer("researched_at", { mode: "timestamp" }),  // last AI research run
+  updatedAt: integer("updated_at", { mode: "timestamp" })
+    .notNull()
+    .default(sql`(unixepoch())`),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .default(sql`(unixepoch())`),
+});
+
+// Time-bounded associations between entities.
+// Covers: person↔company (employment/board), company↔company (ownership).
+export const entityAffiliations = sqliteTable("entity_affiliations", {
+  id: text("id").primaryKey(),
+  // The "subject" entity (person holding a role, or subsidiary company)
+  entityId: text("entity_id")
+    .notNull()
+    .references(() => entities.id, { onDelete: "cascade" }),
+  // The "object" entity (the company/regulator they're affiliated with, or parent company)
+  relatedEntityId: text("related_entity_id")
+    .notNull()
+    .references(() => entities.id, { onDelete: "cascade" }),
+  // Classification
+  affiliationType: text("affiliation_type").notNull(),
+  // 'employment' | 'board' | 'ownership' | 'advisory' | 'regulatory'
+  role: text("role"),          // Job title or stake label, e.g. "CEO", "70% shareholder"
+  ownershipPct: real("ownership_pct"), // 0–100; only meaningful for ownership type
+  // Temporal bounds — stored as partial ISO strings ("YYYY", "YYYY-MM", "YYYY-MM-DD")
+  startDate: text("start_date"),
+  endDate: text("end_date"),   // NULL means still current
+  isCurrent: integer("is_current", { mode: "boolean" }).notNull().default(true),
+  // Provenance
+  source: text("source").notNull().default("manual"), // 'manual' | 'llm_research'
+  confidence: real("confidence").default(1.0),
+  notes: text("notes"),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .default(sql`(unixepoch())`),
+  updatedAt: integer("updated_at", { mode: "timestamp" })
+    .notNull()
+    .default(sql`(unixepoch())`),
+});

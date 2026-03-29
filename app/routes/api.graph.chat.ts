@@ -8,6 +8,7 @@ import {
   articles,
   articleEntities,
   riskSignals,
+  entityAffiliations,
 } from "~/lib/db/schema";
 import type { EntitySearchCandidate } from "~/lib/graphChat/search";
 import { clearPendingResolution, getPendingResolution, setPendingResolution } from "~/lib/graphChat/sessionState";
@@ -197,7 +198,7 @@ export async function action({ request }: ActionFunctionArgs) {
       }
     }
 
-    // ── Step 1: Search the local knowledge graph ──────────────────────
+    // ── Step 1: Keyword-match entities ───────────────────────────────────────
 
     if (resolvedEntityIds.length === 0) {
       const allEntities = await db.select().from(entities);
@@ -335,7 +336,12 @@ export async function action({ request }: ActionFunctionArgs) {
 
     const dedupedEntities = [...new Map(uniqueEntities.map((entity) => [entity.id, entity])).values()];
 
-    // ── Step 2: Optionally enrich with web search ─────────────────────
+    const relevantAE = relevantArticleIds.size > 0
+      ? await db.select().from(articleEntities)
+          .where(inArray(articleEntities.articleId, [...relevantArticleIds]))
+      : [];
+
+    // ── Step 8: Optionally enrich with web search ─────────────────────────────
 
     let webResults: { title: string; url: string; content: string }[] = [];
     if (enableWebSearch && tavilySearch) {
@@ -346,7 +352,7 @@ export async function action({ request }: ActionFunctionArgs) {
       }
     }
 
-    // ── Step 3: Build context and call Gemini ─────────────────────────
+    // ── Step 9: Build LLM context and call Gemini ─────────────────────────────
 
     const entityContext = uniqueEntities
       .map((e) => `- ${e.name} (${e.type}${e.country ? `, ${e.country}` : ""}${e.sector ? `, sector: ${e.sector}` : ""})`)
@@ -355,10 +361,37 @@ export async function action({ request }: ActionFunctionArgs) {
     const relationshipContext = relevantRelationships
       .map((r) => {
         const from = uniqueEntities.find((e) => e.id === r.fromEntityId)?.name ?? r.fromEntityId;
-        const to = uniqueEntities.find((e) => e.id === r.toEntityId)?.name ?? r.toEntityId;
+        const to = (uniqueEntities.find((e) => e.id === r.toEntityId) ?? neighborEntities.find((e) => e.id === r.toEntityId))?.name ?? r.toEntityId;
         return `- ${from} → ${r.relationshipType} → ${to}`;
       })
       .join("\n");
+
+    // Build affiliation context — show ALL affiliations for matched entities,
+    // clearly marking which were active vs inactive during mentioned years.
+    const allEntitiesMap = new Map([...uniqueEntities, ...neighborEntities].map((e) => [e.id, e]));
+    const affiliationContext = allAffiliations.length > 0
+      ? allAffiliations
+          .map(({ aff, subjectName, subjectType }) => {
+            const related = relatedEntityMap.get(aff.relatedEntityId);
+            const subject = subjectName ?? allEntitiesMap.get(aff.entityId)?.name ?? aff.entityId;
+            const relatedName = related?.name ?? aff.relatedEntityId;
+            const period = aff.startDate || aff.endDate
+              ? `[${aff.startDate ?? "?"}–${aff.endDate ?? "present"}]`
+              : aff.isCurrent ? "[current]" : "[dates unknown]";
+
+            // Check temporal relevance against mentioned years
+            let temporalNote = "";
+            if (mentionedYears.length > 0) {
+              const activeYears = mentionedYears.filter((yr) => affiliationActiveInYear(aff, yr));
+              const inactiveYears = mentionedYears.filter((yr) => !affiliationActiveInYear(aff, yr));
+              if (activeYears.length > 0) temporalNote = ` ← ACTIVE in ${activeYears.join(", ")}`;
+              else if (inactiveYears.length > 0) temporalNote = ` ← NOT active in ${inactiveYears.join(", ")}`;
+            }
+
+            return `- ${subject} (${subjectType ?? "?"}) was ${aff.role ?? aff.affiliationType} of ${relatedName} ${period}${temporalNote}`;
+          })
+          .join("\n")
+      : "";
 
     const eventContext = relevantEvents
       .map((e) => {
@@ -375,6 +408,10 @@ export async function action({ request }: ActionFunctionArgs) {
       ? webResults.map((r) => `- "${r.title}" (${r.url}): ${r.content.slice(0, 300)}`).join("\n")
       : "";
 
+    const temporalInstruction = mentionedYears.length > 0
+      ? `CRITICAL: This question refers to year(s) ${mentionedYears.join(", ")}. You MUST use the Affiliation History and Accountability Chains below to identify who held each role DURING THAT PERIOD — NOT the current role-holder. Affiliations marked "← ACTIVE in YYYY" are correct for that year. Affiliations marked "← NOT active in YYYY" must NOT be cited as responsible.`
+      : "";
+
     const prompt = `You are an intelligence analyst assistant for a Central Bank supervisor.
 You have access to a knowledge graph of financial entities, events, and risk signals.
   Answer the user's question using the provided context. Be specific, cite sources when possible.
@@ -387,8 +424,11 @@ If the knowledge graph has limited information, say so clearly. If web search re
 ### Entities Found (${uniqueEntities.length})
 ${dedupedEntities.map((e) => `- ${e.name} (${e.type}${e.country ? `, ${e.country}` : ""}${e.sector ? `, sector: ${e.sector}` : ""})`).join("\n") || "None found matching the query."}
 
-### Relationships (${relevantRelationships.length})
-${relationshipContext || "None found."}
+### Accountability Chains — Pre-resolved: Event → Entity → Person In Charge at Event Time (${accountabilityChains.length})
+${accountabilityChains.length > 0 ? accountabilityChains.join("\n") : "No chains resolved — affiliation data may be incomplete for these entities."}
+
+### Full Affiliation History (${allAffiliations.length} records)
+${affiliationContext || "No affiliation records found for these entities."}
 
 ### Events (${relevantEvents.length})
 ${eventContext || "None found."}
@@ -396,12 +436,15 @@ ${eventContext || "None found."}
 ### Risk Signals (${relevantRiskSignals.length})
 ${riskContext || "None found."}
 
+### AI-Extracted Relationships (${relevantRelationships.length})
+${relationshipContext || "None found."}
+
 ${webContext ? `### Web Search Results\n${webContext}` : ""}
 
 ## User Question
 ${question}
 
-Respond in a clear, structured format. Use bullet points for lists. Mention entity types and dates where relevant. If you reference a web search result, include the URL.`;
+Answer in clear, structured format. When attributing responsibility, always state: the person's name, their role, and the specific time period they held it. Distinguish clearly between past role-holders and current ones.`;
 
     const model = getAI().getGenerativeModel({
       model: "gemini-3-flash-preview",
@@ -418,6 +461,7 @@ Respond in a clear, structured format. Use bullet points for lists. Mention enti
       context: {
         entitiesFound: dedupedEntities.length,
         eventsFound: relevantEvents.length,
+        affiliationsFound: allAffiliations.length,
         relationshipsFound: relevantRelationships.length,
         riskSignalsFound: relevantRiskSignals.length,
         webResultsUsed: webResults.length,
