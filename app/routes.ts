@@ -12,6 +12,10 @@ export default [
   // Knowledge Graph
   route("graph", "routes/graph.tsx"),
 
+  // Entities
+  route("entities", "routes/entities.tsx"),
+  route("entities/:id", "routes/entities.$id.tsx"),
+
   // Ops & Config (nested layout with tabs)
   layout("routes/ops.tsx", [
     index("routes/ops._index.tsx"),
@@ -24,6 +28,9 @@ export default [
   ...prefix("api", [
     route("articles", "routes/api.articles.ts"),
     route("entities", "routes/api.entities.ts"),
+    route("entities/:id", "routes/api.entities.$id.ts"),
+    route("entities/:id/affiliations", "routes/api.entities.$id.affiliations.ts"),
+    route("entities/:id/research", "routes/api.entities.$id.research.ts"),
     route("graph", "routes/api.graph.ts"),
     route("graph/chat", "routes/api.graph.chat.ts"),
     route("crawl", "routes/api.crawl.ts"),

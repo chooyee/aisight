@@ -281,7 +281,7 @@ Respond in a clear, structured format. Use bullet points for lists. Mention enti
       articleToEventIds.get(ev.articleId)!.push(ev.id);
     }
     const seenPairs = new Set<string>();
-    const involvementEdges: typeof relEdges = [];
+    const involvementEdges: { data: { id: string; source: string; target: string; label: string; edgeType: "relationship" | "involvement" | "affiliation"; weight: number | null } }[] = [];
     for (const ae of relevantAE) {
       if (!allSubgraphEntityIds.has(ae.entityId)) continue;
       const evIds = articleToEventIds.get(ae.articleId);

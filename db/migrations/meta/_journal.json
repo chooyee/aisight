@@ -8,6 +8,13 @@
       "when": 1774704164741,
       "tag": "0000_curved_boomer",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1774750242350,
+      "tag": "0001_chilly_master_mold",
+      "breakpoints": true
     }
   ]
 }

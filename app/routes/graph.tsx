@@ -57,8 +57,11 @@ interface EdgeData {
   source: string;
   target: string;
   label: string;
-  edgeType: "relationship" | "involvement";
+  edgeType: "relationship" | "involvement" | "affiliation";
   weight?: number | null;
+  isCurrent?: boolean;
+  affiliationType?: string;
+  ownershipPct?: number | null;
 }
 
 interface GraphNode {
@@ -332,7 +335,7 @@ function GraphCanvas({
               width: 1.5,
             },
           },
-          // Involvement edges: dashed
+          // Involvement edges: dashed (entity↔event)
           {
             selector: "edge[edgeType='involvement']",
             style: {
@@ -343,6 +346,40 @@ function GraphCanvas({
               "target-arrow-color": "#475569",
               "line-style": "dashed" as const,
               width: 1,
+            },
+          },
+          // Affiliation edges: current = solid teal, past = dotted grey
+          {
+            selector: "edge[edgeType='affiliation'][?isCurrent]",
+            style: {
+              label: "data(label)",
+              "font-size": 8,
+              color: "#5eead4",
+              "curve-style": "bezier" as const,
+              "target-arrow-shape": "triangle" as const,
+              "line-color": "#14b8a6",
+              "target-arrow-color": "#14b8a6",
+              width: 2,
+              "text-background-color": "#0f172a",
+              "text-background-opacity": 0.7,
+              "text-background-padding": "2px",
+            },
+          },
+          {
+            selector: "edge[edgeType='affiliation'][!isCurrent]",
+            style: {
+              label: "data(label)",
+              "font-size": 8,
+              color: "#64748b",
+              "curve-style": "bezier" as const,
+              "target-arrow-shape": "triangle" as const,
+              "line-color": "#475569",
+              "target-arrow-color": "#475569",
+              "line-style": "dotted" as const,
+              width: 1.5,
+              "text-background-color": "#0f172a",
+              "text-background-opacity": 0.7,
+              "text-background-padding": "2px",
             },
           },
           // Selected state
@@ -424,7 +461,7 @@ function Legend() {
               </span>
             ))}
           </div>
-          <div className="flex gap-x-3">
+          <div className="flex flex-wrap gap-x-3 gap-y-0.5">
             <span className="flex items-center gap-1">
               <span className="inline-block w-4 h-0 border-t border-[#334155]" />
               <span className="text-white/50 text-[10px]">Relationship</span>
@@ -432,6 +469,14 @@ function Legend() {
             <span className="flex items-center gap-1">
               <span className="inline-block w-4 h-0 border-t border-dashed border-[#475569]" />
               <span className="text-white/50 text-[10px]">Involvement</span>
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="inline-block w-4 h-0 border-t-2 border-[#14b8a6]" />
+              <span className="text-white/50 text-[10px]">Affiliation (current)</span>
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="inline-block w-4 h-0 border-t border-dotted border-[#475569]" />
+              <span className="text-white/50 text-[10px]">Affiliation (past)</span>
             </span>
           </div>
         </div>

@@ -1,7 +1,7 @@
 import type { LoaderFunctionArgs } from "@react-router/node";
 import { eq, and, or, gte, lt, isNull } from "drizzle-orm";
 import { getDb } from "~/lib/db/client";
-import { entities, relationships, events, articleEntities, articles } from "~/lib/db/schema";
+import { entities, relationships, events, articleEntities, articles, entityAffiliations } from "~/lib/db/schema";
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const url = new URL(request.url);
@@ -111,8 +111,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     },
   }));
 
-  // ── Step 5: Relationship edges (entity↔entity) ────────────────────────────
-  // nodeIds already reflects the filtered entity set, so this auto-filters.
+  // ── Step 5: Relationship edges (entity↔entity, AI-extracted) ─────────────
   const relRows = await db.select().from(relationships);
   const relEdges = relRows
     .filter((r) => nodeIds.has(r.fromEntityId) && nodeIds.has(r.toEntityId))
@@ -126,6 +125,29 @@ export async function loader({ request }: LoaderFunctionArgs) {
         weight: r.weight,
       },
     }));
+
+  // ── Step 5b: Affiliation edges (manual + LLM-researched) ─────────────────
+  // Show ALL affiliations (current + past) so the graph tells the full story.
+  const affRows = await db.select().from(entityAffiliations);
+  const affiliationEdges = affRows
+    .filter((a) => nodeIds.has(a.entityId) && nodeIds.has(a.relatedEntityId))
+    .map((a) => {
+      const label = a.role
+        ? a.isCurrent ? a.role : `${a.role} (past)`
+        : a.affiliationType;
+      return {
+        data: {
+          id: `aff_${a.id}`,
+          source: a.entityId,
+          target: a.relatedEntityId,
+          label,
+          edgeType: "affiliation" as const,
+          isCurrent: a.isCurrent,
+          ownershipPct: a.ownershipPct,
+          affiliationType: a.affiliationType,
+        },
+      };
+    });
 
   // ── Step 6: Involvement edges (entity↔event via shared article) ───────────
 
@@ -179,7 +201,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
   }
 
   const nodes = [...entityNodes, ...eventNodes];
-  const edges = [...relEdges, ...involvementEdges];
+  const edges = [...relEdges, ...affiliationEdges, ...involvementEdges];
 
   return Response.json(
     {
@@ -188,6 +210,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
       entityCount: entityNodes.length,
       eventCount: eventNodes.length,
       edgeCount: edges.length,
+      affiliationEdgeCount: affiliationEdges.length,
     },
     { headers: { "Cache-Control": "max-age=60" } }
   );
