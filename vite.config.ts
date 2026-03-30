@@ -7,6 +7,9 @@ import path from "node:path";
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
 export default defineConfig({
+  build: {
+    target: 'esnext' // or 'es2022'
+  },
   resolve: {
     alias: {
       "~": path.resolve(__dirname, "app"),
