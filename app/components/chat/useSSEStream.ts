@@ -3,8 +3,8 @@ import type { PipelineEvent } from "~/lib/sse/emitter";
 
 export type SSEStatus = "idle" | "connecting" | "streaming" | "complete" | "error";
 
-export function useSSEStream(sessionId: string | null) {
-  const [events, setEvents] = useState<PipelineEvent[]>([]);
+export function useSSEStream(sessionId: string | null, initialEvents: PipelineEvent[] = []) {
+  const [events, setEvents] = useState<PipelineEvent[]>(initialEvents);
   const [status, setStatus] = useState<SSEStatus>("idle");
   const esRef = useRef<EventSource | null>(null);
 
@@ -12,7 +12,7 @@ export function useSSEStream(sessionId: string | null) {
     if (!sessionId) return;
 
     setStatus("connecting");
-    setEvents([]);
+    setEvents(initialEvents);
 
     const es = new EventSource(`/api/chat/${sessionId}`);
     esRef.current = es;
@@ -28,6 +28,18 @@ export function useSSEStream(sessionId: string | null) {
     });
 
     es.addEventListener("entity", (e) => {
+      setEvents((prev) => [...prev, JSON.parse(e.data) as PipelineEvent]);
+    });
+
+    es.addEventListener("finding", (e) => {
+      setEvents((prev) => [...prev, JSON.parse(e.data) as PipelineEvent]);
+    });
+
+    es.addEventListener("brief_ready", (e) => {
+      setEvents((prev) => [...prev, JSON.parse(e.data) as PipelineEvent]);
+    });
+
+    es.addEventListener("research_result", (e) => {
       setEvents((prev) => [...prev, JSON.parse(e.data) as PipelineEvent]);
     });
 
@@ -53,7 +65,7 @@ export function useSSEStream(sessionId: string | null) {
       es.close();
       esRef.current = null;
     };
-  }, [sessionId]);
+  }, [initialEvents, sessionId]);
 
   return { events, status };
 }

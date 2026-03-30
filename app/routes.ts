@@ -22,6 +22,7 @@ export default [
     route("sectors", "routes/ops.sectors.tsx"),
     route("calendar", "routes/ops.calendar.tsx"),
     route("extraction", "routes/ops.extraction.tsx"),
+    route("research", "routes/ops.research.tsx"),
   ]),
 
   // API resource routes
@@ -34,6 +35,8 @@ export default [
     route("graph", "routes/api.graph.ts"),
     route("graph/chat", "routes/api.graph.chat.ts"),
     route("crawl", "routes/api.crawl.ts"),
+    route("research/runs", "routes/api.research.runs.ts"),
+    route("research/runs/:id", "routes/api.research.runs.$id.ts"),
     route("chat/:sessionId", "routes/api.chat.$sessionId.ts"),
     ...prefix("config", [
       route("sectors", "routes/api.config.sectors.ts"),

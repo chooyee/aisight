@@ -54,11 +54,13 @@ export default [
   route("dashboard", "routes/dashboard._index.tsx"),  // GET /dashboard
   route("chat", "routes/chat.tsx"),       // GET /chat
 
-  // layout() = a wrapper component that wraps child routes
-  layout("routes/ops.tsx", [
-    route("ops/sectors",    "routes/ops.sectors.tsx"),
-    route("ops/calendar",   "routes/ops.calendar.tsx"),
-    route("ops/extraction", "routes/ops.extraction.tsx"),
+  // Nested route with children mounted into <Outlet /> in routes/ops.tsx
+  route("ops", "routes/ops.tsx", [
+    index("routes/ops._index.tsx"),
+    route("sectors",    "routes/ops.sectors.tsx"),
+    route("calendar",   "routes/ops.calendar.tsx"),
+    route("extraction", "routes/ops.extraction.tsx"),
+    route("research",   "routes/ops.research.tsx"),
   ]),
 
   // prefix() = group routes under a URL prefix
@@ -68,6 +70,8 @@ export default [
     route("articles",           "routes/api.articles.ts"),
     route("graph",              "routes/api.graph.ts"),
     route("graph/chat",         "routes/api.graph.chat.ts"),  // LLM Q&A on the graph
+    route("research/runs",      "routes/api.research.runs.ts"),
+    route("research/runs/:id",  "routes/api.research.runs.$id.ts"),
   ]),
 ] satisfies RouteConfig;
 ```
@@ -128,7 +132,7 @@ export async function action({ request }: ActionFunctionArgs) {
 
 `loader` handles GET. `action` handles everything else.
 
-### Kind 3 — Layout route (wraps child routes)
+### Kind 3 — Parent route with nested children (wraps child routes)
 
 Has only a `default` export that renders `<Outlet />`. The `<Outlet />` is where child routes render.
 
@@ -151,10 +155,10 @@ export default function Ops() {
 }
 ```
 
-When you visit `/ops/sectors`, React Router renders:
+When you visit `/ops/research`, React Router renders:
 ```
 <Ops>           ← ops.tsx (the layout)
-  <OprsSectors> ← ops.sectors.tsx (the child)
+  <OpsResearch> ← ops.research.tsx (the child)
 </Ops>
 ```
 
@@ -318,6 +322,12 @@ The chat page needs live updates while the pipeline runs. This uses Server-Sent 
 8. Browser receives events, useSSEStream appends them to state → UI updates
 ```
 
+Current event types are:
+- `progress`, `article`, `entity`
+- `finding` (supervisor mode signal candidate)
+- `brief_ready` (supervisor brief generated)
+- `complete`, `error`
+
 The `pipelineEmitter` in `app/lib/sse/emitter.ts` is the glue — a Node.js EventEmitter that lives in the same process as everything else:
 
 ```ts
@@ -436,6 +446,9 @@ entry.client.tsx runs
 | Form submit does nothing | The `action()` function in that route file |
 | DB error | `app/lib/db/schema.ts` + `app/lib/db/client.ts` |
 | SSE stream not updating | `app/lib/sse/emitter.ts` + `app/routes/api.chat.$sessionId.ts` |
+| Supervisor run missing from review UI | `app/routes/api.crawl.ts` (ensure `supervisorMode: true`) + `app/routes/ops.research.tsx` |
+| Supervisor brief not generated | `app/lib/pipeline/orchestrator.ts` (post-run synthesis branch) + `app/lib/pipeline/geminiExtract.ts` |
+| Review decision not saved | `app/routes/ops.research.tsx` action or `app/routes/api.research.runs.$id.ts` |
 | Graph page crashes on load | `app/routes/graph.tsx` — Cytoscape SSR guard (`mounted` state) |
 | Graph shows no events/nodes | Check `api.graph.ts` loader — events are derived via `articleEntities` join |
 | Graph chat returns empty answers | `api.graph.chat.ts` — check `GEMINI_API_KEY`; web search requires `TAVILY_API_KEY` |
@@ -531,3 +544,63 @@ Pipeline:
 ```
 
 The response metadata (`context.entitiesFound`, `context.webResultsUsed`, etc.) is shown as small pill tags below the assistant message bubble in the chat UI.
+
+---
+
+## 15. Supervisor research flow (new)
+
+Supervisor mode extends the existing crawl pipeline with persistence, synthesis, and review:
+
+```
+chat.tsx
+  └─ POST /api/crawl
+       body: { query, sourceDomain?, supervisorMode, researchGoal?, minConfidence? }
+          ↓
+api.crawl.ts
+  └─ runPipeline(config)
+          ↓
+orchestrator.ts
+  1) Tavily search/crawl (domain-scoped when sourceDomain set)
+  2) Scrape fallback chain (tavily raw -> readability -> playwright)
+  3) Gemini extraction (entities/events/riskSignals)
+  4) In supervisor mode:
+       - emit `finding` SSE events
+       - persist `supervisor_findings`
+       - synthesize brief via reasonAcrossArticles()
+       - persist `supervisor_briefs`
+       - emit `brief_ready` SSE event
+          ↓
+ops.research.tsx
+  └─ reads supervisor runs + brief + findings + review state
+     and writes review decisions to `supervisor_reviews`
+```
+
+### Storage model for supervisor mode
+
+- `pipeline_runs`
+  - Adds `supervisor_mode`, `source_domain`, `research_goal`
+- `supervisor_findings`
+  - Fine-grained claims with confidence/severity and source URL
+- `supervisor_briefs`
+  - One synthesized brief per run (summary, key findings, recommendations)
+- `supervisor_reviews`
+  - Supervisor decision lifecycle (`approve`, `reject`, `needs_followup`)
+
+### Query surfaces
+
+- `/api/research/runs`
+  - list + filter supervisor runs with summary/review metadata
+- `/api/research/runs/:id`
+  - GET: full detail for one run (brief + findings + review)
+  - POST: upsert review decision
+
+### UI surfaces
+
+- `chat.tsx`
+  - Toggle supervisor mode
+  - Optional `Domain`, `Research goal`, `Min confidence`
+  - Live `finding` and `brief_ready` stream events
+- `ops.research.tsx`
+  - Run list sidebar
+  - Detail panel for brief + findings
+  - Inline review decision form

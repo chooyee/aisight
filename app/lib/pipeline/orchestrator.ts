@@ -4,6 +4,8 @@ import { getDb } from "../db/client.js";
 import {
   articles,
   articleEntities,
+  chatMessages,
+  chatSessions,
   entities,
   relationships,
   events,
@@ -13,12 +15,14 @@ import {
   entityAffiliations,
   pipelineRuns,
   pipelineItems,
+  supervisorBriefs,
+  supervisorFindings,
 } from "../db/schema.js";
 import { pipelineEmitter } from "../sse/emitter.js";
-import { searchNews } from "./tavilySearch.js";
+import { searchNews, crawlDomain } from "./tavilySearch.js";
 import { fetchWithReadability } from "./readabilityFetch.js";
 import { fetchWithPlaywright } from "./playwrightFetch.js";
-import { extractFromArticle } from "./geminiExtract.js";
+import { extractFromArticle, reasonAcrossArticles } from "./geminiExtract.js";
 import { hashUrl } from "./dedup.js";
 import { logger } from "../logger.js";
 
@@ -27,10 +31,48 @@ export interface PipelineConfig {
   sessionId: string;
   maxResults?: number;
   dayRange?: number;
+  /** Restrict search to a specific domain, e.g. "thestar.com.my" */
+  sourceDomain?: string;
+  supervisorMode?: boolean;
+  researchGoal?: string;
+  minConfidence?: number;
 }
+
+type AssistantResultPayload = {
+  kind: "assistant_result_v1";
+  summary: string;
+  confidence?: number;
+  keyFindings?: string[];
+  recommendations?: string[];
+  sources?: string[];
+  status?: "complete" | "error";
+  itemsTotal?: number;
+  itemsCompleted?: number;
+};
 
 function emit(sessionId: string, type: string, payload: Record<string, unknown>) {
   pipelineEmitter.emit(sessionId, { type, ...payload } as never);
+}
+
+async function persistAssistantMessage(
+  sessionId: string,
+  payload: AssistantResultPayload
+) {
+  const db = getDb();
+  const now = new Date();
+
+  await db.insert(chatMessages).values({
+    id: nanoid(),
+    sessionId,
+    role: "assistant",
+    content: JSON.stringify(payload),
+    createdAt: now,
+  });
+
+  await db
+    .update(chatSessions)
+    .set({ lastMessageAt: now })
+    .where(eq(chatSessions.id, sessionId));
 }
 
 export async function runPipeline(config: PipelineConfig): Promise<string> {
@@ -43,6 +85,9 @@ export async function runPipeline(config: PipelineConfig): Promise<string> {
     sessionId: config.sessionId,
     status: "running",
     query: config.query,
+    supervisorMode: config.supervisorMode === true,
+    sourceDomain: config.sourceDomain ?? null,
+    researchGoal: config.researchGoal ?? null,
     startedAt: new Date(),
   });
 
@@ -53,6 +98,13 @@ export async function runPipeline(config: PipelineConfig): Promise<string> {
       .set({ status: "error", errorMessage: String(err), completedAt: new Date() })
       .where(eq(pipelineRuns.id, runId))
       .run();
+    void persistAssistantMessage(config.sessionId, {
+      kind: "assistant_result_v1",
+      summary: String(err),
+      status: "error",
+    }).catch((persistErr) => {
+      logger.error({ err: persistErr, runId }, "Failed to persist pipeline crash message");
+    });
     emit(config.sessionId, "error", { message: String(err) });
   });
 
@@ -62,14 +114,32 @@ export async function runPipeline(config: PipelineConfig): Promise<string> {
 async function executePipeline(runId: string, config: PipelineConfig) {
   const db = getDb();
   const { sessionId, query } = config;
+  const supervisorMode = config.supervisorMode === true;
+  const minConfidence = config.minConfidence ?? 0;
+  const bufferedFindings: Array<{
+    articleId: string;
+    entityId: string | null;
+    eventId: string | null;
+    findingType: string;
+    claim: string;
+    evidenceQuote: string | null;
+    sourceUrl: string;
+    confidence: number;
+    severity: string | null;
+  }> = [];
 
   // ── Phase 1: Search ───────────────────────────────────────────────────────
   emit(sessionId, "progress", { stage: "search", message: `Searching: "${query}"`, percent: 5 });
 
-  const searchResults = await searchNews(query, {
-    maxResults: config.maxResults ?? 10,
-    days: config.dayRange ?? 7,
-  });
+  const searchResults = config.sourceDomain
+    ? await crawlDomain(config.sourceDomain, query, {
+        maxResults: config.maxResults ?? 15,
+        days: config.dayRange ?? 30,
+      })
+    : await searchNews(query, {
+        maxResults: config.maxResults ?? 10,
+        days: config.dayRange ?? 7,
+      });
 
   emit(sessionId, "progress", {
     stage: "search",
@@ -297,6 +367,47 @@ async function executePipeline(runId: string, config: PipelineConfig) {
             direction: signal.direction,
             rationale: signal.rationale,
           });
+
+          if (supervisorMode) {
+            const confidence = signal.severity === "high" ? 0.9 : signal.severity === "medium" ? 0.75 : 0.65;
+            if (confidence >= minConfidence) {
+              bufferedFindings.push({
+                articleId,
+                entityId: signalEntityId ?? null,
+                eventId,
+                findingType: extraction.eventType ?? "risk_event",
+                claim: signal.riskType,
+                evidenceQuote: signal.rationale ?? null,
+                sourceUrl: result.url,
+                confidence,
+                severity: signal.severity ?? null,
+              });
+
+              emit(sessionId, "finding", {
+                claim: signal.riskType,
+                severity: signal.severity ?? "unknown",
+                sourceUrl: result.url,
+                confidence,
+              });
+            }
+          }
+        }
+
+        if (supervisorMode && extraction.summary) {
+          const confidence = 0.7;
+          if (confidence >= minConfidence) {
+            bufferedFindings.push({
+              articleId,
+              entityId: extraction.entities[0]?.name ? (entityIdMap.get(extraction.entities[0].name) ?? null) : null,
+              eventId,
+              findingType: extraction.eventType ?? "event",
+              claim: extraction.summary,
+              evidenceQuote: result.content.slice(0, 280) || null,
+              sourceUrl: result.url,
+              confidence,
+              severity: null,
+            });
+          }
         }
 
         // Store configurable extraction item results
@@ -342,6 +453,117 @@ async function executePipeline(runId: string, config: PipelineConfig) {
     .update(pipelineRuns)
     .set({ status: "complete", completedAt: new Date(), itemsCompleted: completed })
     .where(eq(pipelineRuns.id, runId));
+
+  if (supervisorMode) {
+    for (const finding of bufferedFindings) {
+      await db.insert(supervisorFindings).values({
+        id: nanoid(),
+        runId,
+        articleId: finding.articleId,
+        entityId: finding.entityId,
+        eventId: finding.eventId,
+        findingType: finding.findingType,
+        claim: finding.claim,
+        evidenceQuote: finding.evidenceQuote,
+        sourceUrl: finding.sourceUrl,
+        confidence: finding.confidence,
+        severity: finding.severity,
+      });
+    }
+
+    const topFindings = bufferedFindings
+      .sort((a, b) => b.confidence - a.confidence)
+      .slice(0, 8)
+      .map((f, i) => `${i + 1}. [${f.findingType}] ${f.claim} (severity: ${f.severity ?? "n/a"}, confidence: ${f.confidence.toFixed(2)}, source: ${f.sourceUrl})`)
+      .join("\n");
+
+    const briefingPrompt = `You are a supervisor research assistant. Summarise the run as strict JSON only.\n\nQuery: ${query}\nResearch Goal: ${config.researchGoal ?? "General supervisor research"}\nFindings:\n${topFindings || "No findings."}\n\nReturn ONLY JSON:\n{\n  "summary": "string",\n  "keyFindings": ["string"],\n  "recommendations": ["string"],\n  "confidence": 0.0\n}`;
+
+    const synthesis = await reasonAcrossArticles(briefingPrompt);
+    let summary = "No supervisor summary generated.";
+    let keyFindings: string[] = topFindings ? topFindings.split("\n") : [];
+    let recommendations: string[] = [];
+    let confidence = bufferedFindings.length > 0 ? 0.7 : 0.4;
+
+    if (synthesis) {
+      try {
+        const cleaned = synthesis.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "").trim();
+        const parsed = JSON.parse(cleaned) as {
+          summary?: string;
+          keyFindings?: string[];
+          recommendations?: string[];
+          confidence?: number;
+        };
+        summary = parsed.summary ?? summary;
+        keyFindings = parsed.keyFindings ?? keyFindings;
+        recommendations = parsed.recommendations ?? recommendations;
+        confidence = typeof parsed.confidence === "number" ? parsed.confidence : confidence;
+      } catch (err) {
+        logger.warn({ err, runId }, "Failed to parse supervisor synthesis JSON");
+      }
+    }
+
+    await db.insert(supervisorBriefs).values({
+      id: nanoid(),
+      runId,
+      summary,
+      keyFindingsJson: JSON.stringify(keyFindings),
+      recommendationsJson: JSON.stringify(recommendations),
+      confidence,
+      updatedAt: new Date(),
+    });
+
+    emit(sessionId, "brief_ready", {
+      runId,
+      summary,
+      confidence,
+      keyFindingsCount: keyFindings.length,
+    });
+
+    const sources = Array.from(
+      new Set(
+        bufferedFindings
+          .map((finding) => finding.sourceUrl)
+          .filter((url): url is string => Boolean(url))
+      )
+    ).slice(0, 5);
+
+    emit(sessionId, "research_result", {
+      runId,
+      summary,
+      confidence,
+      keyFindings,
+      recommendations,
+      sources,
+    });
+
+    await persistAssistantMessage(sessionId, {
+      kind: "assistant_result_v1",
+      summary,
+      confidence,
+      keyFindings,
+      recommendations,
+      sources,
+      status: "complete",
+      itemsTotal: newResults.length,
+      itemsCompleted: completed,
+    });
+  } else {
+    const summary = `Research completed. Processed ${completed}/${newResults.length} articles.`;
+    const sources = newResults.slice(0, 5).map((result) => result.url);
+
+    await persistAssistantMessage(sessionId, {
+      kind: "assistant_result_v1",
+      summary,
+      confidence: completed > 0 ? 0.5 : 0,
+      keyFindings: [],
+      recommendations: [],
+      sources,
+      status: "complete",
+      itemsTotal: newResults.length,
+      itemsCompleted: completed,
+    });
+  }
 
   emit(sessionId, "complete", {
     runId,

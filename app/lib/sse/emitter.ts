@@ -4,6 +4,17 @@ export type PipelineEvent =
   | { type: "progress"; stage: string; message: string; percent?: number }
   | { type: "article"; url: string; title: string }
   | { type: "entity"; name: string; entityType: string }
+  | { type: "finding"; claim: string; severity: string; sourceUrl: string; confidence: number }
+  | { type: "brief_ready"; runId: string; summary: string; confidence: number; keyFindingsCount: number }
+  | {
+      type: "research_result";
+      runId: string;
+      summary: string;
+      confidence: number;
+      keyFindings: string[];
+      recommendations: string[];
+      sources: string[];
+    }
   | { type: "complete"; runId: string; itemsTotal: number; itemsCompleted: number }
   | { type: "error"; message: string };
 
