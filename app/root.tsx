@@ -5,7 +5,7 @@ import {
   Scripts,
   ScrollRestoration,
 } from "react-router";
-import type { LinksFunction } from "@react-router/node";
+import type { LinksFunction } from "react-router";
 import appCss from "~/styles/app.css?url";
 
 export const links: LinksFunction = () => [

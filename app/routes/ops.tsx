@@ -5,6 +5,7 @@ const TABS = [
   { to: "/ops/sectors", label: "Sectors" },
   { to: "/ops/calendar", label: "Fiscal Calendars" },
   { to: "/ops/extraction", label: "Extraction Items" },
+  { to: "/ops/research", label: "Research Runs" },
 ];
 
 export default function Ops() {

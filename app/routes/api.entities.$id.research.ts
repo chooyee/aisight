@@ -1,8 +1,7 @@
-import type { ActionFunctionArgs } from "@react-router/node";
-import { eq, and } from "drizzle-orm";
-import { nanoid } from "nanoid";
+import type { ActionFunctionArgs } from "react-router";
+import { eq } from "drizzle-orm";
 import { getDb } from "~/lib/db/client";
-import { entities, entityProfiles, entityAffiliations } from "~/lib/db/schema";
+import { entities, entityProfiles } from "~/lib/db/schema";
 import { logger } from "~/lib/logger";
 import { GoogleGenerativeAI, HarmBlockThreshold, HarmCategory } from "@google/generative-ai";
 
@@ -39,9 +38,23 @@ try {
       }));
     };
   }
-} catch { /* Tavily unavailable */ }
+} catch {
+  // Tavily unavailable
+}
 
-// POST /api/entities/:id/research  — deep-research affiliations via Tavily + Gemini
+type RawAffiliation = {
+  relatedEntityName: string;
+  relatedEntityType: string;
+  affiliationType: string;
+  role?: string | null;
+  ownershipPct?: number | null;
+  startDate?: string | null;
+  endDate?: string | null;
+  isCurrent?: boolean;
+  notes?: string | null;
+};
+
+// POST /api/entities/:id/research - deep-research affiliations via Tavily + Gemini
 export async function action({ request, params }: ActionFunctionArgs) {
   if (request.method !== "POST") {
     return Response.json({ error: "Method not allowed" }, { status: 405 });
@@ -57,8 +70,6 @@ export async function action({ request, params }: ActionFunctionArgs) {
   const [profile] = await db.select().from(entityProfiles).where(eq(entityProfiles.entityId, id));
 
   try {
-    // ── Step 1: Web search ──────────────────────────────────────────────────
-
     let searchContext = "";
     let searchSummary = "";
 
@@ -79,7 +90,9 @@ export async function action({ request, params }: ActionFunctionArgs) {
         try {
           const r = await tavilySearch(q);
           results.push(...r);
-        } catch { /* ignore individual query failures */ }
+        } catch {
+          // ignore individual query failures
+        }
       }
 
       searchContext = results
@@ -88,10 +101,8 @@ export async function action({ request, params }: ActionFunctionArgs) {
         .join("\n\n");
       searchSummary = `Web search: ${results.length} result(s) found`;
     } else {
-      searchSummary = "No web search (TAVILY_API_KEY not set) — Gemini will use general knowledge";
+      searchSummary = "No web search (TAVILY_API_KEY not set) - Gemini will use general knowledge";
     }
-
-    // ── Step 2: Gemini extraction ───────────────────────────────────────────
 
     const entityDesc = [
       `Name: ${entity.name}`,
@@ -138,7 +149,7 @@ Return ONLY a valid JSON object (no markdown, no explanation) matching this exac
 
 Rules:
 - Include BOTH current and historical affiliations.
-- Use null for unknown dates — do not guess.
+- Use null for unknown dates - do not guess.
 - ownershipPct should only be set for "ownership" affiliationType.
 - Maximum 20 affiliations. Prioritise the most significant ones.`;
 
@@ -150,11 +161,9 @@ Rules:
     const result = await model.generateContent(prompt);
     const raw = result.response.text().trim();
 
-    // Strip markdown fences if present
     const jsonStr = raw.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "").trim();
     const parsed = JSON.parse(jsonStr) as { affiliations: unknown[] };
 
-    // Update researchedAt on the profile
     if (profile) {
       await db
         .update(entityProfiles)
@@ -162,92 +171,23 @@ Rules:
         .where(eq(entityProfiles.entityId, id));
     }
 
-    // ── Auto-save extracted affiliations to DB ─────────────────────────────
-    type RawAffiliation = {
-      relatedEntityName: string;
-      relatedEntityType: string;
-      affiliationType: string;
-      role?: string | null;
-      ownershipPct?: number | null;
-      startDate?: string | null;
-      endDate?: string | null;
-      isCurrent?: boolean;
-      notes?: string | null;
-    };
-
     const rawList = (parsed.affiliations ?? []) as RawAffiliation[];
-    const savedAffiliations: unknown[] = [];
-
-    for (const item of rawList) {
-      if (!item.relatedEntityName || !item.affiliationType) continue;
-
-      // Find or create the related entity
-      let [relatedEntity] = await db
-        .select()
-        .from(entities)
-        .where(eq(entities.name, item.relatedEntityName))
-        .limit(1);
-
-      if (!relatedEntity) {
-        const newId = nanoid();
-        [relatedEntity] = await db
-          .insert(entities)
-          .values({
-            id: newId,
-            name: item.relatedEntityName,
-            type: (item.relatedEntityType ?? "company") as "company" | "regulator" | "person" | "instrument",
-            firstSeenAt: new Date(),
-          })
-          .returning();
-      }
-
-      // Skip if this exact affiliation already exists
-      const [existing] = await db
-        .select({ id: entityAffiliations.id })
-        .from(entityAffiliations)
-        .where(
-          and(
-            eq(entityAffiliations.entityId, id),
-            eq(entityAffiliations.relatedEntityId, relatedEntity.id),
-            eq(entityAffiliations.affiliationType, item.affiliationType),
-            eq(entityAffiliations.role, item.role ?? "")
-          )
-        )
-        .limit(1);
-
-      if (existing) {
-        savedAffiliations.push({ ...item, id: existing.id, relatedEntityId: relatedEntity.id, skipped: true });
-        continue;
-      }
-
-      const isCurrent = item.isCurrent ?? (item.endDate == null);
-      const [inserted] = await db
-        .insert(entityAffiliations)
-        .values({
-          id: nanoid(),
-          entityId: id,
-          relatedEntityId: relatedEntity.id,
-          affiliationType: item.affiliationType as "employment" | "board" | "ownership" | "advisory" | "regulatory",
-          role: item.role ?? null,
-          ownershipPct: item.ownershipPct ?? null,
-          startDate: item.startDate ?? null,
-          endDate: isCurrent ? null : (item.endDate ?? null),
-          isCurrent,
-          source: "llm_research",
-          confidence: 0.8,
-          notes: item.notes ?? null,
-        })
-        .returning();
-
-      savedAffiliations.push({
-        ...inserted,
-        relatedName: relatedEntity.name,
-        relatedType: relatedEntity.type,
-      });
-    }
+    const suggestedAffiliations = rawList
+      .filter((item) => item.relatedEntityName && item.affiliationType)
+      .map((item) => ({
+        relatedEntityName: item.relatedEntityName,
+        relatedEntityType: item.relatedEntityType ?? "company",
+        affiliationType: item.affiliationType,
+        role: item.role ?? null,
+        ownershipPct: item.ownershipPct ?? null,
+        startDate: item.startDate ?? null,
+        endDate: item.endDate ?? null,
+        isCurrent: item.isCurrent ?? (item.endDate == null),
+        notes: item.notes ?? null,
+      }));
 
     return Response.json({
-      affiliations: savedAffiliations,
+      affiliations: suggestedAffiliations,
       searchSummary,
     });
   } catch (err) {

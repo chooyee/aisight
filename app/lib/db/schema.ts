@@ -102,6 +102,9 @@ export const pipelineRuns = sqliteTable("pipeline_runs", {
   sessionId: text("session_id"),
   status: text("status").notNull().default("pending"), // 'pending' | 'running' | 'complete' | 'error'
   query: text("query"),
+  supervisorMode: integer("supervisor_mode", { mode: "boolean" }).notNull().default(false),
+  sourceDomain: text("source_domain"),
+  researchGoal: text("research_goal"),
   progress: text("progress"), // JSON blob with per-stage detail
   itemsTotal: integer("items_total").default(0),
   itemsCompleted: integer("items_completed").default(0),
@@ -260,6 +263,60 @@ export const entityAffiliations = sqliteTable("entity_affiliations", {
     .notNull()
     .default(sql`(unixepoch())`),
   updatedAt: integer("updated_at", { mode: "timestamp" })
+    .notNull()
+    .default(sql`(unixepoch())`),
+});
+
+// ── Supervisor research ─────────────────────────────────────────────────────
+
+export const supervisorBriefs = sqliteTable("supervisor_briefs", {
+  id: text("id").primaryKey(),
+  runId: text("run_id")
+    .notNull()
+    .unique()
+    .references(() => pipelineRuns.id, { onDelete: "cascade" }),
+  summary: text("summary"),
+  keyFindingsJson: text("key_findings_json"),
+  recommendationsJson: text("recommendations_json"),
+  confidence: real("confidence"),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .default(sql`(unixepoch())`),
+  updatedAt: integer("updated_at", { mode: "timestamp" })
+    .notNull()
+    .default(sql`(unixepoch())`),
+});
+
+export const supervisorFindings = sqliteTable("supervisor_findings", {
+  id: text("id").primaryKey(),
+  runId: text("run_id")
+    .notNull()
+    .references(() => pipelineRuns.id, { onDelete: "cascade" }),
+  articleId: text("article_id").references(() => articles.id, { onDelete: "set null" }),
+  entityId: text("entity_id").references(() => entities.id, { onDelete: "set null" }),
+  eventId: text("event_id").references(() => events.id, { onDelete: "set null" }),
+  findingType: text("finding_type").notNull(),
+  claim: text("claim").notNull(),
+  evidenceQuote: text("evidence_quote"),
+  sourceUrl: text("source_url"),
+  confidence: real("confidence"),
+  severity: text("severity"),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .default(sql`(unixepoch())`),
+});
+
+export const supervisorReviews = sqliteTable("supervisor_reviews", {
+  id: text("id").primaryKey(),
+  runId: text("run_id")
+    .notNull()
+    .unique()
+    .references(() => pipelineRuns.id, { onDelete: "cascade" }),
+  decision: text("decision").notNull(), // 'approve' | 'reject' | 'needs_followup'
+  reviewer: text("reviewer"),
+  notes: text("notes"),
+  reviewedAt: integer("reviewed_at", { mode: "timestamp" }).notNull(),
+  createdAt: integer("created_at", { mode: "timestamp" })
     .notNull()
     .default(sql`(unixepoch())`),
 });

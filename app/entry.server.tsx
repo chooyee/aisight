@@ -1,5 +1,5 @@
 import { PassThrough } from "node:stream";
-import type { AppLoadContext, EntryContext } from "@react-router/node";
+import type { AppLoadContext, EntryContext } from "react-router";
 import { createReadableStreamFromReadable } from "@react-router/node";
 import { ServerRouter } from "react-router";
 import { isbot } from "isbot";
@@ -27,7 +27,7 @@ function handleBotRequest(
 ) {
   return new Promise((resolve, reject) => {
     const { abort, pipe } = renderToPipeableStream(
-      <ServerRouter context={routerContext} url={request.url} abortDelay={ABORT_DELAY} />,
+      <ServerRouter context={routerContext} url={request.url} />,
       {
         onAllReady() {
           const body = new PassThrough();
@@ -57,7 +57,7 @@ function handleBrowserRequest(
 ) {
   return new Promise((resolve, reject) => {
     const { abort, pipe } = renderToPipeableStream(
-      <ServerRouter context={routerContext} url={request.url} abortDelay={ABORT_DELAY} />,
+      <ServerRouter context={routerContext} url={request.url} />,
       {
         onShellReady() {
           const body = new PassThrough();

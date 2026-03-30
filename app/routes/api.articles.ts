@@ -1,4 +1,4 @@
-import type { LoaderFunctionArgs } from "@react-router/node";
+import type { LoaderFunctionArgs } from "react-router";
 import { desc, gte, lte, eq, and, type SQL } from "drizzle-orm";
 import { getDb } from "~/lib/db/client";
 import { articles, articleEntities, entities } from "~/lib/db/schema";

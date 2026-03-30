@@ -1,4 +1,4 @@
-import { type RouteConfig, index, route, layout, prefix } from "@react-router/dev/routes";
+import { type RouteConfig, index, route, prefix } from "@react-router/dev/routes";
 
 export default [
   index("routes/_index.tsx"),
@@ -17,11 +17,12 @@ export default [
   route("entities/:id", "routes/entities.$id.tsx"),
 
   // Ops & Config (nested layout with tabs)
-  layout("routes/ops.tsx", [
+  route("ops", "routes/ops.tsx", [
     index("routes/ops._index.tsx"),
-    route("ops/sectors", "routes/ops.sectors.tsx"),
-    route("ops/calendar", "routes/ops.calendar.tsx"),
-    route("ops/extraction", "routes/ops.extraction.tsx"),
+    route("sectors", "routes/ops.sectors.tsx"),
+    route("calendar", "routes/ops.calendar.tsx"),
+    route("extraction", "routes/ops.extraction.tsx"),
+    route("research", "routes/ops.research.tsx"),
   ]),
 
   // API resource routes
@@ -34,6 +35,8 @@ export default [
     route("graph", "routes/api.graph.ts"),
     route("graph/chat", "routes/api.graph.chat.ts"),
     route("crawl", "routes/api.crawl.ts"),
+    route("research/runs", "routes/api.research.runs.ts"),
+    route("research/runs/:id", "routes/api.research.runs.$id.ts"),
     route("chat/:sessionId", "routes/api.chat.$sessionId.ts"),
     ...prefix("config", [
       route("sectors", "routes/api.config.sectors.ts"),

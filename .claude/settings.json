@@ -21,7 +21,8 @@
       "Read(//d//**)",
       "Read(//d/Users/LeeChooYee/**)",
       "Bash(powershell -Command \":*)",
-      "Bash(curl -sv http://127.0.0.1:3000/)"
+      "Bash(curl -sv http://127.0.0.1:3000/)",
+      "Bash(python3 -c \"import sys,json; data=sys.stdin.read\\(\\); lines=data.strip\\(\\).split\\(''\\\\n''\\); [print\\(json.loads\\(l\\).get\\(''message'',{}\\).get\\(''content'',''''\\)[:500] if isinstance\\(json.loads\\(l\\).get\\(''message'',{}\\).get\\(''content'',''''\\),str\\) else ''''\\) for l in lines[-5:] if l]\")"
     ],
     "additionalDirectories": [
       "D:\\Users\\LeeChooYee\\repo\\jsrepo\\aisight\\log"

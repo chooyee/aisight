@@ -2,7 +2,7 @@
 
 News scraping and intelligence extraction tool for Central Bank supervisors.
 
-**Stack:** React Router v7 · Express · SQLite (Drizzle ORM) · Tailwind v4 · Gemini Flash/Pro · Tavily · Playwright
+**Stack:** React Router v7 - Express - SQLite (Drizzle ORM) - Tailwind v4 - Gemini Flash/Pro - Tavily - Playwright
 
 ## Setup
 
@@ -17,15 +17,41 @@ npx playwright install chromium
 ## Development
 
 ```bash
-npm run dev        # tsx watch server.ts — hot-reloads via Vite middleware
+npm run dev        # tsx watch server.ts - hot-reloads via Vite middleware
 ```
 
 Open [http://localhost:3000](http://localhost:3000).
 
+## How To Use The System
+
+Use this flow for normal operations:
+
+1. Configure monitoring scope first:
+   - Go to `/ops/sectors` and add or update sectors and keywords to monitor.
+   - Go to `/ops/calendar` and configure fiscal calendars for tracked entities.
+   - Go to `/ops/extraction` and define extraction items for custom risk/event fields.
+2. Start a collection run:
+   - Open `/chat`.
+   - Submit a crawl query (for example: `Basel III capital requirements banks APAC`).
+   - Monitor live pipeline progress in the chat stream while scraping/extraction runs.
+3. Review extracted intelligence:
+   - Open `/dashboard` to review article feed, events, entities, and risk signals.
+   - Use filters/date ranges to focus on the reporting period you need.
+4. Investigate relationships:
+   - Open `/graph` to inspect entity-event relationships in the knowledge graph.
+   - Click nodes for details, then use graph chat for cross-article reasoning and follow-up questions.
+5. Iterate:
+   - Refine sectors, extraction items, or queries based on results, then run another crawl.
+
+Recommended first run:
+- Set up one sector with a small keyword set.
+- Run one targeted query from `/chat`.
+- Validate outcomes on `/dashboard` and `/graph` before scaling up query volume.
+
 ## Production
 
 ```bash
-npm run build      # react-router build → build/client + build/server
+npm run build      # react-router build -> build/client + build/server
 npm start          # NODE_ENV=production node server.js
 ```
 
@@ -44,7 +70,7 @@ Migrations run automatically on server startup.
 | Path | Description |
 |------|-------------|
 | `/dashboard` | Chronological article feed with risk signals |
-| `/chat` | Command interface — issue scraping commands, watch live progress |
+| `/chat` | Command interface - issue scraping commands, watch live progress |
 | `/graph` | Cytoscape.js knowledge graph of entity relationships |
 | `/ops/sectors` | Manage monitored sectors and keywords |
 | `/ops/calendar` | Configure entity-specific fiscal calendars |

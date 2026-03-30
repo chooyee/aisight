@@ -1,5 +1,6 @@
-import type { ActionFunctionArgs } from "@react-router/node";
+import type { ActionFunctionArgs } from "react-router";
 import { nanoid } from "nanoid";
+import { eq } from "drizzle-orm";
 import { getDb } from "~/lib/db/client";
 import { chatSessions, chatMessages } from "~/lib/db/schema";
 import { runPipeline } from "~/lib/pipeline/orchestrator";
@@ -14,7 +15,14 @@ export async function action({ request }: ActionFunctionArgs) {
     sessionId?: string;
     maxResults?: number;
     dayRange?: number;
+    sourceDomain?: string;
+    researchMode?: boolean;
+    supervisorMode?: boolean;
+    researchGoal?: string;
+    minConfidence?: number;
   };
+
+  const researchMode = body.researchMode ?? body.supervisorMode ?? false;
 
   if (!body.query?.trim()) {
     return Response.json({ error: "query is required" }, { status: 400 });
@@ -42,12 +50,25 @@ export async function action({ request }: ActionFunctionArgs) {
     createdAt: new Date(),
   });
 
+  await db
+    .update(chatSessions)
+    .set({ lastMessageAt: new Date() })
+    .where(eq(chatSessions.id, sessionId));
+
   const runId = await runPipeline({
     query: body.query,
     sessionId,
     maxResults: body.maxResults,
     dayRange: body.dayRange,
+    sourceDomain: body.sourceDomain,
+    supervisorMode: researchMode,
+    researchGoal: body.researchGoal,
+    minConfidence: body.minConfidence,
   });
 
-  return Response.json({ runId, sessionId });
+  return Response.json({
+    runId,
+    sessionId,
+    mode: researchMode ? "research" : "standard",
+  });
 }
