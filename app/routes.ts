@@ -5,6 +5,7 @@ export default [
 
   // Dashboard
   route("dashboard", "routes/dashboard._index.tsx"),
+  route("articles/:id", "routes/articles.$id.tsx"),
 
   // Chat
   route("chat", "routes/chat.tsx"),
@@ -28,6 +29,7 @@ export default [
   // API resource routes
   ...prefix("api", [
     route("articles", "routes/api.articles.ts"),
+    route("articles/:id", "routes/api.articles.$id.ts"),
     route("entities", "routes/api.entities.ts"),
     route("entities/:id", "routes/api.entities.$id.ts"),
     route("entities/:id/affiliations", "routes/api.entities.$id.affiliations.ts"),

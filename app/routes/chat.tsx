@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import type { LoaderFunctionArgs } from "react-router";
-import { useLoaderData } from "react-router";
+import { useLoaderData, Link } from "react-router";
 import { desc, eq } from "drizzle-orm";
 import { AppShell } from "~/components/layout/AppShell";
 import { useSSEStream } from "~/components/chat/useSSEStream";
@@ -39,6 +39,8 @@ type StoredAssistantPayload = {
   keyFindings?: string[];
   recommendations?: string[];
   sources?: string[];
+  articleTitles?: string[];
+  articleIds?: string[];
   status?: "complete" | "error";
   itemsTotal?: number;
   itemsCompleted?: number;
@@ -60,10 +62,16 @@ function assistantPayloadToHistoryEntry(query: string, payload: StoredAssistantP
     itemsCompleted: payload.itemsCompleted ?? payload.itemsTotal ?? 0,
   };
 
-  // Standard mode: no key findings or recommendations — skip ResearchResponse
+  // Standard mode: no key findings or recommendations — reconstruct article events from stored titles
   const hasResearch = (payload.keyFindings?.length ?? 0) > 0 || (payload.recommendations?.length ?? 0) > 0;
   if (!hasResearch) {
-    return { query, status: "complete", events: [completeEvent] };
+    const articleEvents: PipelineEvent[] = (payload.articleTitles ?? []).map((title, i) => ({
+      type: "article" as const,
+      url: "",
+      title,
+      articleId: payload.articleIds?.[i],
+    }));
+    return { query, status: "complete", events: [...articleEvents, completeEvent] };
   }
 
   return {
@@ -189,7 +197,16 @@ function EventLine({ ev }: { ev: PipelineEvent }) {
     return (
       <div className="flex items-center gap-2 text-xs">
         <span className="text-green-400 shrink-0">✓</span>
-        <span className="text-green-400/80 font-medium">{ev.title}</span>
+        {ev.articleId ? (
+          <Link
+            to={`/articles/${ev.articleId}`}
+            className="text-green-400/80 font-medium hover:text-green-300 hover:underline"
+          >
+            {ev.title}
+          </Link>
+        ) : (
+          <span className="text-green-400/80 font-medium">{ev.title}</span>
+        )}
       </div>
     );
 

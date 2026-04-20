@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 
 export type PipelineEvent =
   | { type: "progress"; stage: string; message: string; percent?: number }
-  | { type: "article"; url: string; title: string }
+  | { type: "article"; url: string; title: string; articleId?: string }
   | { type: "entity"; name: string; entityType: string }
   | { type: "finding"; claim: string; severity: string; sourceUrl: string; confidence: number }
   | { type: "brief_ready"; runId: string; summary: string; confidence: number; keyFindingsCount: number }

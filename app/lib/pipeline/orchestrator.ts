@@ -45,6 +45,8 @@ type AssistantResultPayload = {
   keyFindings?: string[];
   recommendations?: string[];
   sources?: string[];
+  articleTitles?: string[];
+  articleIds?: string[];
   status?: "complete" | "error";
   itemsTotal?: number;
   itemsCompleted?: number;
@@ -127,6 +129,7 @@ async function executePipeline(runId: string, config: PipelineConfig) {
     confidence: number;
     severity: string | null;
   }> = [];
+  const processedArticles: Array<{ title: string; url: string; articleId: string }> = [];
 
   // ── Phase 1: Search ───────────────────────────────────────────────────────
   emit(sessionId, "progress", { stage: "search", message: `Searching: "${query}"`, percent: 5 });
@@ -222,8 +225,6 @@ async function executePipeline(runId: string, config: PipelineConfig) {
         throw new Error("Insufficient content after all scraping tiers");
       }
 
-      emit(sessionId, "article", { url: result.url, title: result.title });
-
       // ── Phase 4: Extract ────────────────────────────────────────────────
       emit(sessionId, "progress", {
         stage: "extract",
@@ -242,6 +243,9 @@ async function executePipeline(runId: string, config: PipelineConfig) {
         scrapedAt: new Date(),
         source: scrapeMethod as "tavily" | "readability" | "playwright",
       });
+
+      emit(sessionId, "article", { url: result.url, title: result.title ?? result.url, articleId });
+      processedArticles.push({ title: result.title ?? result.url, url: result.url, articleId });
 
       const extraction = await extractFromArticle(content, result.url);
 
@@ -559,6 +563,8 @@ async function executePipeline(runId: string, config: PipelineConfig) {
       keyFindings: [],
       recommendations: [],
       sources,
+      articleTitles: processedArticles.map((a) => a.title),
+      articleIds: processedArticles.map((a) => a.articleId),
       status: "complete",
       itemsTotal: newResults.length,
       itemsCompleted: completed,

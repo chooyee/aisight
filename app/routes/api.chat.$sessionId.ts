@@ -1,4 +1,7 @@
 import type { LoaderFunctionArgs } from "react-router";
+import { desc, eq } from "drizzle-orm";
+import { getDb } from "~/lib/db/client";
+import { pipelineRuns } from "~/lib/db/schema";
 import { pipelineEmitter, type PipelineEvent } from "~/lib/sse/emitter";
 
 // GET /api/chat/:sessionId — Server-Sent Events stream for real-time pipeline progress
@@ -9,6 +12,18 @@ export async function loader({ params }: LoaderFunctionArgs) {
   }
 
   const encoder = new TextEncoder();
+
+  // Check if the most recent run for this session already finished before the
+  // client opened the SSE connection (race condition: pipeline can complete
+  // before the EventSource is registered).
+  const db = getDb();
+  const latestRun = await db
+    .select()
+    .from(pipelineRuns)
+    .where(eq(pipelineRuns.sessionId, sessionId))
+    .orderBy(desc(pipelineRuns.startedAt))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
 
   const stream = new ReadableStream({
     start(controller) {
@@ -40,6 +55,26 @@ export async function loader({ params }: LoaderFunctionArgs) {
 
       // Initial connected event
       send("connected", { sessionId });
+
+      // If the run already finished, send terminal event immediately and close
+      if (latestRun && (latestRun.status === "complete" || latestRun.status === "error")) {
+        if (latestRun.status === "complete") {
+          send("complete", {
+            type: "complete",
+            runId: latestRun.id,
+            itemsTotal: latestRun.itemsTotal ?? 0,
+            itemsCompleted: latestRun.itemsCompleted ?? 0,
+          });
+        } else {
+          send("error", {
+            type: "error",
+            message: latestRun.errorMessage ?? "Pipeline failed",
+          });
+        }
+        pipelineEmitter.off(sessionId, handler);
+        clearInterval(heartbeat);
+        try { controller.close(); } catch { /* already closed */ }
+      }
     },
     cancel() {
       // Client disconnected — clean up listeners

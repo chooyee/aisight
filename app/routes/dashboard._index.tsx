@@ -1,6 +1,6 @@
 import type { LoaderFunctionArgs } from "react-router";
 import { useLoaderData, Link } from "react-router";
-import { desc, gte, lte, and, eq, type SQL } from "drizzle-orm";
+import { desc, gte, lte, and, eq, sql, type SQL } from "drizzle-orm";
 import { getDb } from "~/lib/db/client";
 import { articles, articleEntities, entities, riskSignals, events, fiscalCalendars } from "~/lib/db/schema";
 import { AppShell } from "~/components/layout/AppShell";
@@ -69,7 +69,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     .select()
     .from(articles)
     .where(filters.length > 0 ? and(...filters) : undefined)
-    .orderBy(desc(articles.publishedAt))
+    .orderBy(desc(sql`coalesce(${articles.publishedAt}, ${articles.scrapedAt})`))
     .limit(50);
 
   const articlesWithMeta = await Promise.all(
@@ -230,20 +230,16 @@ export default function Dashboard() {
         ) : (
           <div className="space-y-3">
             {articles.map((article) => (
-              <article
+              <Link
                 key={article.id}
-                className="bg-[var(--color-surface-1)] border border-[var(--color-border)] rounded-lg p-4 hover:border-[var(--color-accent)]/40 transition-colors"
+                to={`/articles/${article.id}`}
+                className="block bg-[var(--color-surface-1)] border border-[var(--color-border)] rounded-lg p-4 hover:border-[var(--color-accent)]/40 transition-colors"
               >
                 <div className="flex items-start justify-between gap-4">
                   <div className="flex-1 min-w-0">
-                    <a
-                      href={article.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="font-medium text-white/90 hover:text-[var(--color-accent)] transition-colors line-clamp-2 text-sm"
-                    >
+                    <p className="font-medium text-white/90 line-clamp-2 text-sm">
                       {article.title ?? article.url}
-                    </a>
+                    </p>
                     <div className="flex flex-wrap gap-1.5 mt-2">
                       {article.entities.map((e) => (
                         <span
@@ -280,7 +276,7 @@ export default function Dashboard() {
                 <p className="text-xs text-white/30 mt-2">
                   {article.source} · {article.language ?? "en"}
                 </p>
-              </article>
+              </Link>
             ))}
           </div>
         )}
